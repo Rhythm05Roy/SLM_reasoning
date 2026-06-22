@@ -42,6 +42,14 @@ def run_sft(config, model, tokenizer, sft_train, sft_eval) -> None:
     logger.info(f"  LR             : {config.sft_lr}")
     logger.info(f"  Batch          : {config.sft_batch_size}  GradAccum={config.sft_grad_accum}")
 
+    # Determine the training dtype so we can re-cast LoRA params after SFT.
+    # load_best_model_at_end=True reloads the checkpoint from disk, which
+    # restores LoRA B-matrices to float32 (the safetensors default), breaking
+    # the dtype alignment needed by Unsloth's fast_lora kernel in GRPO.
+    # We disable it and rely on the explicit re-cast below instead.
+    # Always use bfloat16 — RTX 5090 Blackwell always supports it.
+    _train_dtype = torch.bfloat16
+
     sft_cfg = SFTConfig(
         output_dir=str(Path(config.output_dir) / "sft"),
         per_device_train_batch_size=config.sft_batch_size,
@@ -56,12 +64,15 @@ def run_sft(config, model, tokenizer, sft_train, sft_eval) -> None:
         eval_steps=config.eval_steps,
         eval_strategy="steps",
         save_total_limit=2,
-        load_best_model_at_end=True,
+        # Do NOT set load_best_model_at_end=True — it reloads the checkpoint
+        # from disk and restores LoRA weights to float32, which breaks the
+        # dtype alignment required by Unsloth's fast_lora GRPO kernel.
+        load_best_model_at_end=False,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         optim="adamw_8bit",
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
+        fp16=False,
+        bf16=True,
         max_steps=config.sft_max_steps,
         seed=config.seed,
         report_to="wandb" if config.use_wandb else "none",
@@ -83,6 +94,21 @@ def run_sft(config, model, tokenizer, sft_train, sft_eval) -> None:
 
     logger.info("Starting SFT training...")
     trainer.train()
+
+    # ── Re-cast LoRA params to training dtype ─────────────────────────────
+    # The SFT Trainer may leave some adapter weights in float32 (e.g. from
+    # optimizer state casting or internal HF callbacks). Re-cast here so
+    # the model handed to the GRPO stage is fully dtype-consistent.
+    recast_count = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad and param.dtype != _train_dtype:
+            param.data = param.data.to(_train_dtype)
+            recast_count += 1
+    if recast_count:
+        logger.info(
+            f"Re-cast {recast_count} LoRA param tensors to {_train_dtype} "
+            "after SFT (prevents GRPO fast_lora dtype clash)"
+        )
 
     # ── Save adapter ───────────────────────────────────────────────────────
     model.save_pretrained(sft_adapter_path)

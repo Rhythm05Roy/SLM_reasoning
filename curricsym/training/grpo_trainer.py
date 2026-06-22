@@ -74,8 +74,8 @@ def _run_stage(
         per_device_train_batch_size=config.grpo_batch_size,
         gradient_accumulation_steps=config.grpo_grad_accum,
         optim="paged_adamw_8bit",
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
+        fp16=False,
+        bf16=True,
         num_generations=config.grpo_num_generations,
         max_prompt_length=config.max_seq_length // 2,
         max_completion_length=config.max_seq_length // 2,
@@ -105,6 +105,29 @@ def _run_stage(
         train_dataset=stage_data,
         callbacks=[curriculum_callback],
     )
+    # Bypass Unsloth compiled GRPOTrainer bug where it defaults _autocast_dtype to float16
+    trainer._autocast_dtype = torch.bfloat16
+
+    # ── Enforce dtype consistency before training ──────────────────────────
+    # Guard against any LoRA params that drifted back to float32 (e.g. from
+    # load_best_model_at_end in SFT or optimizer state). Unsloth's fast_lora
+    # kernel requires all LoRA tensors to share the same dtype as the base
+    # model weights or it crashes with "got Half and Float".
+    _target_dtype = torch.bfloat16  # RTX 5090 Blackwell always supports bf16
+    _recast = sum(
+        1 for _, p in model.named_parameters()
+        if p.requires_grad and p.dtype != _target_dtype
+        and not (p.dtype == torch.int8 or p.dtype == torch.uint8)  # skip quant
+    )
+    if _recast:
+        for _, param in model.named_parameters():
+            if (param.requires_grad
+                    and param.dtype not in (torch.int8, torch.uint8)
+                    and param.dtype != _target_dtype):
+                param.data = param.data.to(_target_dtype)
+        logger.info(
+            f"Stage {stage}: re-cast {_recast} LoRA tensors → {_target_dtype}"
+        )
 
     result = trainer.train()
 

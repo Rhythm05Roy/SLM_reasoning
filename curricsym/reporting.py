@@ -107,7 +107,6 @@ def _get_hardware_info() -> dict:
             torch.cuda.get_device_properties(0).total_memory / 1024 ** 3, 2
         )
     try:
-        import torch
         info["torch_version"] = torch.__version__
         info["cuda_version"] = torch.version.cuda
     except Exception:

@@ -58,10 +58,18 @@ def load_model_and_tokenizer(config, for_inference: bool = False):
     logger.info(f"Loading: {config.model_name}")
     logger.info(f"  load_in_4bit={config.load_in_4bit}  max_seq_length={config.max_seq_length}")
 
+    # Always use bfloat16 — RTX 5090 (Blackwell) and all Ampere+ GPUs
+    # support it. Do NOT use torch.cuda.is_bf16_supported() here:
+    # on some PyTorch builds it returns inconsistent results for new
+    # GPU architectures, causing the model to load in float16 while
+    # the trainer expects bfloat16 → Unsloth fast_lora dtype crash.
+    import torch as _torch
+    _dtype = _torch.bfloat16
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=config.model_name,
         max_seq_length=config.max_seq_length,
-        dtype=None,            # auto: bfloat16 on Ampere+, float16 otherwise
+        dtype=_dtype,
         load_in_4bit=config.load_in_4bit,
     )
 
@@ -85,6 +93,18 @@ def load_model_and_tokenizer(config, for_inference: bool = False):
         use_gradient_checkpointing=config.use_gradient_checkpointing,
         random_state=config.seed,
     )
+
+    # ── Cast LoRA params to match bfloat16 ───────────────────────────────
+    # PEFT initialises LoRA B-matrices in float32. Cast them to bfloat16
+    # to match the base model and prevent Unsloth fast_lora dtype crash.
+    if not config.load_in_4bit:
+        cast_count = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.dtype != _torch.bfloat16:
+                param.data = param.data.to(_torch.bfloat16)
+                cast_count += 1
+        if cast_count:
+            logger.info(f"Cast {cast_count} LoRA params → bfloat16")
 
     # ── VRAM report ───────────────────────────────────────────────────────
     if torch.cuda.is_available():

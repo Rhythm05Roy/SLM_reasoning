@@ -40,6 +40,7 @@ import argparse
 import json
 import logging
 import os
+os.environ['ACCELERATE_MIXED_PRECISION'] = 'bf16'
 import sys
 from pathlib import Path
 
