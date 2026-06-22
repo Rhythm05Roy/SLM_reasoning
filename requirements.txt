@@ -10,9 +10,8 @@ torchvision
 torchaudio
 
 # ── Unsloth (must be installed BEFORE transformers in RunPod) ─
-# Use the nightly wheel matching your CUDA version — see unsloth.ai
-# For CUDA 12.4+ / torch 2.3+ on RTX 4090:
-unsloth[cu124-torch230] @ https://github.com/unslothai/unsloth/releases/download/tag-2026.2.1/unsloth-2026.2.1-py3-none-any.whl
+unsloth
+unsloth_zoo
 
 # ── Hugging Face ecosystem ────────────────────────────────────
 transformers>=4.45.0
