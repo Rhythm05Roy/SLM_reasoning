@@ -75,6 +75,7 @@ from curricsym.evaluation import (
     plot_accuracy_comparison,
     plot_process_quality,
     plot_internalization_delta,
+    generate_all_tables,
 )
 from curricsym.reporting import build_experiment_report
 
@@ -237,7 +238,15 @@ def _generate_plots(
         consistency_rate=consistency_rate,
         output_dir=config.output_dir,
     )
-    logger.info(f"Figures saved → {config.output_dir}/")
+    generate_all_tables(
+        with_tools=with_tools,
+        without_tools=without_tools,
+        internalization_results=internalization_results,
+        stage_metrics=stage_metrics,
+        ablations=results.get("ablations", {}),
+        output_dir=config.output_dir,
+    )
+    logger.info(f"Figures and tables saved → {config.output_dir}/")
 
 
 def _push_to_hub(model, tokenizer, args: argparse.Namespace) -> None:

@@ -11,6 +11,7 @@ from .visualisation import (
     plot_accuracy_comparison,
     plot_process_quality,
     plot_internalization_delta,
+    generate_all_tables,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "plot_accuracy_comparison",
     "plot_process_quality",
     "plot_internalization_delta",
+    "generate_all_tables",
 ]
