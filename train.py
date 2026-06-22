@@ -45,7 +45,10 @@ import sys
 from pathlib import Path
 
 # ── Make sure the package is importable when running as a script ──────────
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Insert the directory that *contains* the curricsym/ package.
+_PROJECT_ROOT = Path(__file__).resolve().parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from curricsym.configs import TrainingConfig
 from curricsym.utils import (
@@ -223,7 +226,9 @@ def _generate_plots(
     without_tools,
     internalization_results,
     consistency_rate,
+    ablations: dict | None = None,
 ) -> None:
+    """Generate all thesis figures and publication tables."""
     logger.info("Generating result figures...")
     plot_stage_losses(stage_metrics, config.output_dir)
     plot_tool_fading(stage_metrics, config.output_dir)
@@ -243,7 +248,7 @@ def _generate_plots(
         without_tools=without_tools,
         internalization_results=internalization_results,
         stage_metrics=stage_metrics,
-        ablations=results.get("ablations", {}),
+        ablations=ablations or {},
         output_dir=config.output_dir,
     )
     logger.info(f"Figures and tables saved → {config.output_dir}/")
@@ -350,6 +355,7 @@ def main() -> None:
             without_tools=results.get("without_tools", {}),
             internalization_results=internalization_results,
             consistency_rate=results.get("consistency_rate", 0.0),
+            ablations=results.get("ablations", {}),
         )
 
     # ── Phase 5: Optional model merge & Hub push ──────────────────────────

@@ -1,0 +1,18 @@
+% LaTeX table: Table 5: Ablation Study Summary
+\begin{table}[htbp]
+  \centering
+  \caption{Table 5: Ablation Study Summary}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Ablation} & \textbf{Key Metric} & \textbf{Value} & \textbf{Finding} \\
+    \midrule
+    Curriculum Stages & Stage Losses & 0.00656 -> 0.00697 -> 0.00684 & Loss rises as tool ratio decreases (harder task) \\
+    Tool Reliance & Tool Call Rate & 0.85 & Model relies on tools 90\% of the time \\
+    Domain: Math & Acc w/t vs w/o & 0.000 vs 0.071 & Math struggles most without verifier access \\
+    Domain: FOL & Acc w/t vs w/o & 0.667 vs 0.333 & FOL generalizes better without tools \\
+    Faithfulness & Heuristic PRM & 0.275 (w/t) & Low - neural PRM distillation is future work \\
+    Efficiency & Latency (s) & 9.538 vs 9.471 & Tool-free is marginally slower (longer traces) \\
+    Verifier & Z3 Calls / Cache & 21 / 77 & Efficient caching reduces redundant Z3 calls \\
+    \bottomrule
+  \end{tabular}
+\end{table}

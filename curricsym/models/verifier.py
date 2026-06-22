@@ -138,12 +138,12 @@ class SymbolicVerifier:
             "total": 0, "cached": 0, "z3_calls": 0, "fallbacks": 0,
         }
 
-    def _key(self, q: str, a: str) -> str:
-        return hashlib.md5(f"{q}:{a}".encode()).hexdigest()
+    def _key(self, q: str, a: str, gt: str) -> str:
+        return hashlib.md5(f"{q}:{a}:{gt}".encode()).hexdigest()
 
     def verify_math(self, question: str, predicted: str, ground_truth: str) -> dict:
         self.stats["total"] += 1
-        key = self._key(question, predicted)
+        key = self._key(question, predicted, ground_truth)
         if key in self.cache:
             self.stats["cached"] += 1
             return self.cache[key]
@@ -173,7 +173,7 @@ class SymbolicVerifier:
 
     def verify_fol(self, question: str, predicted: str, ground_truth: str) -> dict:
         self.stats["total"] += 1
-        key = self._key(question, predicted)
+        key = self._key(question, predicted, ground_truth)
         if key in self.cache:
             self.stats["cached"] += 1
             return self.cache[key]
