@@ -1,46 +1,31 @@
 """
-evaluation/visualisation.py — Training & Evaluation Plots + Tables
-==================================================================
-Generates all publication-grade figures and LaTeX tables for the thesis:
+evaluation/visualisation.py — All thesis result figures.
 
-  Figures (Saved as PNG/PDF for publication quality)
-  --------------------------------------------------
-  Figure 1: Curriculum stage losses (with standard error bounds if available)
-  Figure 2: Tool-fading schedule
-  Figure 3: Accuracy with vs without tools (Overall, Math, FOL)
-  Figure 4: Process quality metrics (faithfulness, format, consistency)
-  Figure 5: Internalization delta bar chart with significance annotations
-  Figure 6: Unified dashboard (2×3 grid)
-  Figure 7: Metric Radar Chart (multi-dimensional comparison)
+Figures generated:
+  1. Stage losses (curriculum progression)
+  2. Tool-fading schedule
+  3. Accuracy comparison (with vs without tools)
+  4. Process quality metrics
+  5. Internalization delta bar chart
+  6. OOD robustness gap          ← NEW
+  7. Reward curve vs tool_ratio  ← NEW (stage transition visual)
+  8. Full 2×4 dashboard
 
-  Tables (Saved as PNG and LaTeX .tex format)
-  -------------------------------------------
-  Table 1: Main results (accuracy, faithfulness, format, latency)
-  Table 2: Domain breakdown (Math vs FOL)
-  Table 3: Curriculum stage progression
-  Table 4: Internalization analysis
-  Table 5: Ablation summary
+All figures saved as 150 DPI PNG for direct inclusion in LaTeX.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Lazy import — matplotlib may not be installed in all environments
 try:
     import matplotlib
-    matplotlib.use("Agg")          # non-interactive backend — safe on headless servers
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    from matplotlib.projections import register_projection
-    from matplotlib.projections.polar import PolarAxes
-    from matplotlib.spines import Spine
-    from matplotlib.path import Path as SubPath
     _MPL_AVAILABLE = True
 except ImportError:
     _MPL_AVAILABLE = False
@@ -57,646 +42,289 @@ def _require_mpl(fn):
     return wrapper
 
 
-# ---------------------------------------------------------------------------
-# Styling and Palette Constants (Academic & Premium Dark/Light Contrast)
-# ---------------------------------------------------------------------------
-# Professional academic color palette (Seaborn-like muted & deep colors)
-C_PRIMARY = "#1f77b4"    # Steel Blue
-C_SUCCESS = "#2ca02c"    # Muted Green
-C_DANGER = "#d62728"     # Crimson/Muted Red
-C_WARN = "#ff7f0e"       # Muted Orange
-C_NEUTRAL = "#7f7f7f"    # Gray
-C_PURPLE = "#9467bd"     # Muted Purple
-C_TEAL = "#17becf"       # Teal
-
-plt.rcParams.update({
-    "font.size": 10,
-    "axes.labelsize": 11,
-    "axes.titlesize": 12,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "figure.titlesize": 14,
-    "font.family": "sans-serif",
-    "grid.alpha": 0.3,
-    "grid.linestyle": "--",
-})
-
-
-# ---------------------------------------------------------------------------
-# Helper to write LaTeX tables
-# ---------------------------------------------------------------------------
-def _write_latex_table(title: str, headers: list[str], rows: list[list[str]], output_path: str):
-    """Generates a professional, booktabs-styled LaTeX table file."""
-    try:
-        tex_path = Path(output_path).with_suffix(".tex")
-        cols_spec = "l" + "c" * (len(headers) - 1)
-        
-        lines = []
-        lines.append(f"% LaTeX table: {title}")
-        lines.append("\\begin{table}[htbp]")
-        lines.append("  \\centering")
-        lines.append(f"  \\caption{{{title}}}")
-        lines.append(f"  \\begin{{tabular}}{{{cols_spec}}}")
-        lines.append("    \\toprule")
-        lines.append("    " + " & ".join(f"\\textbf{{{h.replace('%', '\\%')}}}" for h in headers) + " \\\\")
-        lines.append("    \\midrule")
-        
-        for r in rows:
-            escaped_row = [str(cell).replace("%", "\\%").replace("_", "\\_") for cell in r]
-            lines.append("    " + " & ".join(escaped_row) + " \\\\")
-            
-        lines.append("    \\bottomrule")
-        lines.append("  \\end{tabular}")
-        lines.append("\\end{table}")
-        
-        with open(tex_path, "w") as f:
-            f.write("\n".join(lines))
-        logger.info(f"LaTeX table saved → {tex_path}")
-    except Exception as e:
-        logger.error(f"Failed to write LaTeX table to {output_path}: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Individual figure helpers
-# ---------------------------------------------------------------------------
 @_require_mpl
 def plot_stage_losses(stage_metrics: list, output_dir: str) -> str:
     stages = [m["stage"] for m in stage_metrics]
     losses = [m["loss"] for m in stage_metrics]
-    colors = [C_SUCCESS, C_WARN, C_DANGER]
-    labels = ["Early\n(Tools=1.0)", "Mid\n(Tools=0.5)", "Late\n(Tools=0.0)"]
-
+    colors = ["#2ecc71", "#f39c12", "#e74c3c"]
+    labels = ["Stage 0\n(Tools=1.0)", "Stage 1\n(Tools=0.5)", "Stage 2\n(Tools=0.0)"]
     fig, ax = plt.subplots(figsize=(6, 4))
-    bars = ax.bar(stages, losses, color=colors, width=0.5, edgecolor="none", alpha=0.85)
-    ax.set_xlabel("Curriculum Stage", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Training Loss", fontsize=11, fontweight="bold")
-    ax.set_title("Loss progression by Curriculum Stage", fontsize=12, fontweight="bold", pad=15)
+    bars = ax.bar(stages, losses, color=colors, edgecolor="white", linewidth=1.2)
+    ax.set_xlabel("Curriculum Stage", fontsize=12)
+    ax.set_ylabel("Training Loss", fontsize=12)
+    ax.set_title("Loss by Curriculum Stage", fontsize=13, fontweight="bold")
     ax.set_xticks(stages)
     ax.set_xticklabels(labels, fontsize=10)
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
-    
     for bar, loss in zip(bars, losses):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.002,
-            f"{loss:.4f}",
-            ha="center", va="bottom", fontsize=10, fontweight="bold"
-        )
-        
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
+                f"{loss:.3f}", ha="center", fontsize=10)
     plt.tight_layout()
-    path = str(Path(output_dir) / "fig_stage_losses.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    path = str(Path(output_dir) / "fig1_stage_losses.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+    logger.info(f"Saved: {path}")
     return path
 
 
 @_require_mpl
 def plot_tool_fading(stage_metrics: list, output_dir: str) -> str:
     stages = [m["stage"] for m in stage_metrics]
-    tool_ratios = [m["tool_ratio"] for m in stage_metrics]
-
+    tr = [m["tool_ratio"] for m in stage_metrics]
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(stages, tool_ratios, "o-", linewidth=3, markersize=10, color=C_PRIMARY, label="Tool availability")
-    ax.fill_between(stages, tool_ratios, alpha=0.1, color=C_PRIMARY)
-    ax.set_xlabel("Curriculum Stage", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Tool Access Ratio", fontsize=11, fontweight="bold")
-    ax.set_title("Tool-Fading Schedule (Internalization)", fontsize=12, fontweight="bold", pad=15)
+    ax.plot(stages, tr, "o-", linewidth=2.5, markersize=10, color="#3498db")
+    ax.fill_between(stages, tr, alpha=0.15, color="#3498db")
+    ax.set_xlabel("Curriculum Stage", fontsize=12)
+    ax.set_ylabel("Tool Ratio", fontsize=12)
+    ax.set_title("Tool-Fading Schedule (AdaRFT)", fontsize=13, fontweight="bold")
     ax.set_xticks(stages)
-    ax.set_xticklabels([f"Stage {s}" for s in stages], fontsize=10)
     ax.set_ylim(-0.05, 1.1)
-    ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5, label="50% Mid-point")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.legend(frameon=True, fontsize=10, loc="lower left")
-    
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
+    ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5, label="50% threshold")
+    ax.legend(fontsize=10)
     plt.tight_layout()
-    path = str(Path(output_dir) / "fig_tool_fading.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    path = str(Path(output_dir) / "fig2_tool_fading.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
 @_require_mpl
-def plot_accuracy_comparison(
-    with_tools: dict, without_tools: dict, output_dir: str
-) -> str:
+def plot_accuracy_comparison(with_tools: dict, without_tools: dict, output_dir: str) -> str:
     cats = ["Overall", "Math", "FOL"]
-    wacc = [
-        with_tools.get("overall_accuracy", 0.0),
-        with_tools.get("math_accuracy", 0.0),
-        with_tools.get("fol_accuracy", 0.0),
-    ]
-    nacc = [
-        without_tools.get("overall_accuracy", 0.0),
-        without_tools.get("math_accuracy", 0.0),
-        without_tools.get("fol_accuracy", 0.0),
-    ]
+    wacc = [with_tools["overall_accuracy"], with_tools["math_accuracy"], with_tools["fol_accuracy"]]
+    nacc = [without_tools["overall_accuracy"], without_tools["math_accuracy"], without_tools["fol_accuracy"]]
     x, w = np.arange(len(cats)), 0.35
-
     fig, ax = plt.subplots(figsize=(7, 5))
-    b1 = ax.bar(x - w / 2, wacc, w, label="With Tools (Oracle)", color=C_PRIMARY, alpha=0.9)
-    b2 = ax.bar(x + w / 2, nacc, w, label="Without Tools (Internalized)", color=C_DANGER, alpha=0.9)
-    
-    ax.set_ylabel("Accuracy", fontsize=11, fontweight="bold")
-    ax.set_title("Inference Performance: With vs Without External Tools", fontsize=12, fontweight="bold", pad=15)
+    b1 = ax.bar(x - w / 2, wacc, w, label="With Tools", color="#2ecc71", edgecolor="white")
+    b2 = ax.bar(x + w / 2, nacc, w, label="Without Tools", color="#e74c3c", edgecolor="white")
+    ax.set_ylabel("Accuracy", fontsize=12)
+    ax.set_title("Accuracy: With vs Without Tools", fontsize=13, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(cats, fontsize=11)
     ax.set_ylim(0, 1.1)
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
-    ax.legend(fontsize=10, frameon=True, loc="upper right")
-    
+    ax.legend(fontsize=10)
     for bar in list(b1) + list(b2):
         h = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            h + 0.01,
-            f"{h:.3f}",
-            ha="center", va="bottom", fontsize=9, fontweight="bold"
-        )
-        
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
+        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01,
+                f"{h:.3f}", ha="center", fontsize=9)
     plt.tight_layout()
-    path = str(Path(output_dir) / "fig_accuracy_comparison.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    path = str(Path(output_dir) / "fig3_accuracy_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
 @_require_mpl
-def plot_process_quality(
-    with_tools: dict,
-    consistency_rate: float,
-    output_dir: str,
-) -> str:
-    mets = ["Faithfulness", "Format Score", "Consistency"]
-    vals = [
-        with_tools.get("avg_faithfulness", 0.0),
-        with_tools.get("avg_format_score", 0.0),
-        consistency_rate,
-    ]
-    colors = [C_PURPLE, C_TEAL, C_WARN]
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    bars = ax.bar(mets, vals, color=colors, width=0.45, alpha=0.85)
-    ax.set_ylabel("Score", fontsize=11, fontweight="bold")
-    ax.set_title("Process Quality & Structural Metrics", fontsize=12, fontweight="bold", pad=15)
+def plot_process_quality(with_tools: dict, consistency_rate: float, output_dir: str) -> str:
+    mets = ["Faithfulness", "Format Score", "Tool Efficiency", "Consistency"]
+    vals = [with_tools["avg_faithfulness"], with_tools["avg_format_score"],
+            with_tools.get("tool_efficiency", 0.0), consistency_rate]
+    colors = ["#9b59b6", "#1abc9c", "#f39c12", "#f1c40f"]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar(mets, vals, color=colors, edgecolor="white", linewidth=1.2)
+    ax.set_ylabel("Score", fontsize=12)
+    ax.set_title("Process Quality Metrics", fontsize=13, fontweight="bold")
     ax.set_ylim(0, 1.15)
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
-    
     for bar, val in zip(bars, vals):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.02,
-            f"{val:.3f}",
-            ha="center", va="bottom", fontsize=10, fontweight="bold"
-        )
-        
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f"{val:.3f}", ha="center", fontsize=10)
     plt.tight_layout()
-    path = str(Path(output_dir) / "fig_process_quality.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    path = str(Path(output_dir) / "fig4_process_quality.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
 @_require_mpl
 def plot_internalization_delta(internalization_results: dict, output_dir: str) -> str:
-    labels = ["With Tools", "Without Tools"]
-    accs = [
-        internalization_results.get("accuracy_with_tools", 0.0),
-        internalization_results.get("accuracy_without_tools", 0.0),
-    ]
-    delta = internalization_results.get("internalization_delta", 0.0)
-    colors = [C_PRIMARY, C_DANGER]
-
+    accs = [internalization_results.get("accuracy_with_tools", 0),
+            internalization_results.get("accuracy_without_tools", 0)]
+    delta = internalization_results.get("internalization_delta", 0)
     fig, ax = plt.subplots(figsize=(6, 4))
-    bars = ax.bar(labels, accs, color=colors, width=0.4, alpha=0.85)
-    ax.set_ylabel("Accuracy", fontsize=11, fontweight="bold")
-    ax.set_title(
-        f"Internalization Analysis (Δ = {delta:.4f})",
-        fontsize=12, fontweight="bold", pad=15
-    )
+    bars = ax.bar(["With Tools", "Without Tools"], accs,
+                  color=["#2ecc71", "#e74c3c"], width=0.4, edgecolor="white")
+    ax.set_ylabel("Accuracy", fontsize=12)
+    ax.set_title(f"Internalization Analysis  (Δ = {delta:.4f})", fontsize=13, fontweight="bold")
     ax.set_ylim(0, 1.15)
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
-    
     for bar, acc in zip(bars, accs):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.01,
-            f"{acc:.3f}",
-            ha="center", va="bottom", fontsize=11, fontweight="bold"
-        )
-        
-    interpretation = "✅ Strong" if delta < 0.1 else "⚠️ Moderate" if delta < 0.2 else "❌ Weak"
-    ax.annotate(
-        f"Δ = {delta:.4f}\n{interpretation}",
-        xy=(0.5, 0.8), xycoords="axes fraction",
-        ha="center", fontsize=10, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="#fdfefe", edgecolor="#bdc3c7", alpha=0.9),
-    )
-    
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                f"{acc:.3f}", ha="center", fontsize=11)
+    quality = "✅ Strong" if delta < 0.1 else "⚠️ Moderate" if delta < 0.2 else "❌ Weak"
+    ax.annotate(f"Δ = {delta:.4f}\n{quality}", xy=(0.5, 0.82), xycoords="axes fraction",
+                ha="center", fontsize=11,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
     plt.tight_layout()
-    path = str(Path(output_dir) / "fig_internalization_delta.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    path = str(Path(output_dir) / "fig5_internalization_delta.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
-# ---------------------------------------------------------------------------
-# Upgraded Metric Radar Chart helper
-# ---------------------------------------------------------------------------
 @_require_mpl
-def plot_metric_radar(with_tools: dict, without_tools: dict, consistency_rate: float, output_dir: str) -> str:
-    """Radar chart comparing multidimensional capabilities."""
-    categories = ["Overall Acc", "Math Acc", "FOL Acc", "Faithfulness", "Format Score", "Consistency"]
-    N = len(categories)
-    
-    angles = [n / float(N) * 2 * np.pi for n in range(N)]
-    angles += angles[:1]
-    
-    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
-    
-    # Draw one axe per variable + add labels
-    plt.xticks(angles[:-1], categories, size=9, fontweight="bold")
-    
-    # Draw ylabels
-    ax.set_rlabel_position(0)
-    plt.yticks([0.2, 0.4, 0.6, 0.8, 1.0], ["0.2", "0.4", "0.6", "0.8", "1.0"], color="grey", size=7)
-    plt.ylim(0, 1.1)
-    
-    # With Tools data
-    wt_values = [
-        with_tools.get("overall_accuracy", 0.0),
-        with_tools.get("math_accuracy", 0.0),
-        with_tools.get("fol_accuracy", 0.0),
-        with_tools.get("avg_faithfulness", 0.0),
-        with_tools.get("avg_format_score", 0.0),
-        consistency_rate
-    ]
-    wt_values += wt_values[:1]
-    ax.plot(angles, wt_values, linewidth=2, linestyle='solid', color=C_PRIMARY, label="With Tools")
-    ax.fill(angles, wt_values, color=C_PRIMARY, alpha=0.15)
-    
-    # Without Tools data
-    nt_values = [
-        without_tools.get("overall_accuracy", 0.0),
-        without_tools.get("math_accuracy", 0.0),
-        without_tools.get("fol_accuracy", 0.0),
-        without_tools.get("avg_faithfulness", 0.0),
-        without_tools.get("avg_format_score", 0.0),
-        consistency_rate
-    ]
-    nt_values += nt_values[:1]
-    ax.plot(angles, nt_values, linewidth=2, linestyle='solid', color=C_DANGER, label="Without Tools")
-    ax.fill(angles, nt_values, color=C_DANGER, alpha=0.15)
-    
-    plt.title("Multi-dimensional Metric Alignment (Radar Chart)", size=12, fontweight="bold", pad=20)
-    plt.legend(loc="upper right", bbox_to_anchor=(0.1, 0.1), frameon=True, fontsize=9)
-    
+def plot_ood_robustness(with_tools: dict, ood_results: dict, output_dir: str) -> str:
+    """NEW: In-distribution vs OOD accuracy bar chart (GSM-Symbolic main vs p1)."""
+    if not ood_results or not ood_results.get("ood_accuracy"):
+        return None
+    cats = ["In-Dist (main)", "OOD (p1 harder)"]
+    vals = [with_tools.get("math_accuracy", 0), ood_results.get("ood_accuracy", 0)]
+    gap = ood_results.get("ood_robustness_gap", 0)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bars = ax.bar(cats, vals, color=["#3498db", "#e67e22"], width=0.4, edgecolor="white")
+    ax.set_ylabel("Accuracy", fontsize=12)
+    ax.set_title(f"OOD Robustness (Gap = {gap:.4f})", fontsize=13, fontweight="bold")
+    ax.set_ylim(0, 1.1)
+    for bar, val in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                f"{val:.3f}", ha="center", fontsize=11)
+    ax.annotate(f"Robustness gap: {gap:.4f}", xy=(0.5, 0.85), xycoords="axes fraction",
+                ha="center", fontsize=11,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#eaf4fb", alpha=0.8))
     plt.tight_layout()
-    path = str(Path(output_dir) / "fig_metric_radar.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    path = str(Path(output_dir) / "fig6_ood_robustness.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
-# ---------------------------------------------------------------------------
-# Full dashboard (2×3 grid)
-# ---------------------------------------------------------------------------
 @_require_mpl
-def generate_full_dashboard(
-    stage_metrics: list,
-    with_tools: dict,
-    without_tools: dict,
-    internalization_results: dict,
-    consistency_rate: float,
-    output_dir: str,
-) -> str:
-    """Save a single 2×3 combined figure with Seaborn aesthetics."""
-    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
-    fig.suptitle(
-        "CurricSym-SLM-Lite — Master Thesis Training & Evaluation Dashboard",
-        fontsize=16, fontweight="bold", y=0.98
-    )
+def plot_reward_curve(reward_history: list, tool_ratio_history: list,
+                      output_dir: str) -> str:
+    """NEW: Reward curve overlaid with tool_ratio fade — shows curriculum is working."""
+    if not reward_history:
+        return None
+    steps = list(range(len(reward_history)))
+    fig, ax1 = plt.subplots(figsize=(8, 4))
+    color1 = "#3498db"
+    ax1.set_xlabel("Training Step", fontsize=12)
+    ax1.set_ylabel("Avg Reward (20-step window)", color=color1, fontsize=11)
+    # Smooth reward
+    window = min(20, len(reward_history))
+    smooth = [float(np.mean(reward_history[max(0, i - window):i + 1]))
+              for i in range(len(reward_history))]
+    ax1.plot(steps, smooth, color=color1, linewidth=2, label="Reward")
+    ax1.tick_params(axis="y", labelcolor=color1)
+    ax1.set_ylim(-0.2, 1.2)
+
+    if tool_ratio_history:
+        ax2 = ax1.twinx()
+        color2 = "#e74c3c"
+        ax2.set_ylabel("Tool Ratio", color=color2, fontsize=11)
+        ax2.plot(steps[:len(tool_ratio_history)], tool_ratio_history,
+                 color=color2, linewidth=2, linestyle="--", label="Tool Ratio")
+        ax2.tick_params(axis="y", labelcolor=color2)
+        ax2.set_ylim(-0.05, 1.2)
+
+    ax1.set_title("Reward Curve vs Tool-Fading Schedule", fontsize=13, fontweight="bold")
+    fig.legend(loc="upper right", bbox_to_anchor=(0.88, 0.88), fontsize=10)
+    plt.tight_layout()
+    path = str(Path(output_dir) / "fig7_reward_curve.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+@_require_mpl
+def generate_full_dashboard(stage_metrics: list, with_tools: dict,
+                             without_tools: dict, internalization_results: dict,
+                             consistency_rate: float, output_dir: str,
+                             ood_results: dict | None = None) -> str:
+    """2×4 master dashboard — primary figure for thesis results section."""
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+    fig.suptitle("CurricSym-SLM-Lite — Training & Evaluation Results",
+                 fontsize=15, fontweight="bold")
+
+    stages = [m["stage"] for m in stage_metrics]
+    losses = [m["loss"] for m in stage_metrics]
+    colors = ["#2ecc71", "#f39c12", "#e74c3c"]
 
     # 1) Stage losses
     ax = axes[0, 0]
-    stages = [m["stage"] for m in stage_metrics]
-    losses = [m["loss"] for m in stage_metrics]
-    ax.bar(stages, losses, color=[C_SUCCESS, C_WARN, C_DANGER], alpha=0.8, width=0.5)
-    ax.set_title("Loss by Curriculum Stage", fontweight="bold")
+    ax.bar(stages, losses, color=colors, edgecolor="white")
+    ax.set_title("Curriculum Stage Losses")
     ax.set_xticks(stages)
     ax.set_xticklabels(["Early\n(1.0)", "Mid\n(0.5)", "Late\n(0.0)"])
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    for s, l in zip(stages, losses):
-        ax.text(s, l + 0.002, f"{l:.4f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    for s, l, c in zip(stages, losses, colors):
+        ax.text(s, l + 0.002, f"{l:.3f}", ha="center", fontsize=9)
 
-    # 2) Tool-fading schedule
+    # 2) Tool fading
     ax = axes[0, 1]
     tr = [m["tool_ratio"] for m in stage_metrics]
-    ax.plot(stages, tr, "o-", linewidth=2.5, markersize=8, color=C_PRIMARY)
-    ax.set_title("Tool-Fading Schedule", fontweight="bold")
-    ax.set_xticks(stages)
-    ax.set_xticklabels([f"Stage {s}" for s in stages])
+    ax.plot(stages, tr, "o-", linewidth=2, markersize=8, color="#3498db")
+    ax.set_title("Tool-Fading Schedule")
     ax.set_ylim(-0.05, 1.1)
-    ax.axhline(0.5, color="gray", linestyle="--", alpha=0.4)
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5)
 
     # 3) Internalization delta
     ax = axes[0, 2]
-    ax.bar(
-        ["With Tools", "Without Tools"],
-        [internalization_results.get("accuracy_with_tools", 0.0),
-         internalization_results.get("accuracy_without_tools", 0.0)],
-        color=[C_PRIMARY, C_DANGER], width=0.4, alpha=0.8
-    )
-    delta = internalization_results.get("internalization_delta", 0.0)
-    ax.set_title(f"Internalization Δ = {delta:.4f}", fontweight="bold")
-    ax.set_ylim(0, 1.15)
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    delta = internalization_results.get("internalization_delta", 0)
+    ax.bar(["With Tools", "Without Tools"],
+           [internalization_results.get("accuracy_with_tools", 0),
+            internalization_results.get("accuracy_without_tools", 0)],
+           color=["#2ecc71", "#e74c3c"], width=0.4, edgecolor="white")
+    ax.set_title(f"Internalization Δ = {delta:.4f}")
+    ax.set_ylim(0, 1.1)
 
-    # 4) Accuracy by domain
+    # 4) OOD robustness (or latency fallback)
+    ax = axes[0, 3]
+    if ood_results and ood_results.get("ood_accuracy"):
+        gap = ood_results.get("ood_robustness_gap", 0)
+        ax.bar(["In-Dist", "OOD (p1)"],
+               [with_tools.get("math_accuracy", 0), ood_results["ood_accuracy"]],
+               color=["#3498db", "#e67e22"], edgecolor="white")
+        ax.set_title(f"OOD Robustness Gap={gap:.3f}")
+    else:
+        ax.bar(["With Tools", "Without Tools"],
+               [with_tools["avg_latency_s"], without_tools["avg_latency_s"]],
+               color=["#3498db", "#95a5a6"], edgecolor="white")
+        ax.set_title("Avg Latency (s)")
+    ax.set_ylim(0, 1.1)
+
+    # 5) Domain accuracy
     ax = axes[1, 0]
     cats = ["Overall", "Math", "FOL"]
-    w_acc = [with_tools.get("overall_accuracy", 0.0), with_tools.get("math_accuracy", 0.0), with_tools.get("fol_accuracy", 0.0)]
-    n_acc = [without_tools.get("overall_accuracy", 0.0), without_tools.get("math_accuracy", 0.0), without_tools.get("fol_accuracy", 0.0)]
+    wacc = [with_tools["overall_accuracy"], with_tools["math_accuracy"], with_tools["fol_accuracy"]]
+    nacc = [without_tools["overall_accuracy"], without_tools["math_accuracy"], without_tools["fol_accuracy"]]
     x, bw = np.arange(len(cats)), 0.35
-    ax.bar(x - bw / 2, w_acc, bw, label="With Tools", color=C_PRIMARY, alpha=0.85)
-    ax.bar(x + bw / 2, n_acc, bw, label="Without Tools", color=C_DANGER, alpha=0.85)
-    ax.set_title("Accuracy by Domain", fontweight="bold")
+    ax.bar(x - bw / 2, wacc, bw, label="With Tools", color="#2ecc71", edgecolor="white")
+    ax.bar(x + bw / 2, nacc, bw, label="Without Tools", color="#e74c3c", edgecolor="white")
+    ax.set_title("Accuracy by Domain")
     ax.set_xticks(x)
     ax.set_xticklabels(cats)
-    ax.legend(fontsize=9, frameon=True)
-    ax.set_ylim(0, 1.15)
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    ax.legend(fontsize=8)
+    ax.set_ylim(0, 1.1)
 
-    # 5) Process quality
+    # 6) Process quality
     ax = axes[1, 1]
-    mets = ["Faithfulness", "Format", "Consistency"]
-    vals = [with_tools.get("avg_faithfulness", 0.0), with_tools.get("avg_format_score", 0.0), consistency_rate]
-    bars = ax.bar(mets, vals, color=[C_PURPLE, C_TEAL, C_WARN], alpha=0.8, width=0.45)
-    ax.set_title("Process Quality Metrics", fontweight="bold")
+    mets = ["Faith.", "Format", "Tool Eff.", "Consist."]
+    vals = [with_tools["avg_faithfulness"], with_tools["avg_format_score"],
+            with_tools.get("tool_efficiency", 0.0), consistency_rate]
+    bars = ax.bar(mets, vals, color=["#9b59b6", "#1abc9c", "#f39c12", "#f1c40f"],
+                  edgecolor="white")
+    ax.set_title("Process Quality")
     ax.set_ylim(0, 1.15)
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
     for bar, val in zip(bars, vals):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.02,
-            f"{val:.3f}", ha="center", va="bottom", fontsize=9, fontweight="bold"
-        )
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f"{val:.3f}", ha="center", fontsize=9)
 
-    # 6) Latency comparison
+    # 7) Latency
     ax = axes[1, 2]
-    ax.bar(
-        ["With Tools", "Without Tools"],
-        [with_tools.get("avg_latency_s", 0.0), without_tools.get("avg_latency_s", 0.0)],
-        color=[C_PRIMARY, C_NEUTRAL], alpha=0.8, width=0.4
-    )
-    ax.set_title("Avg Inference Latency", fontweight="bold")
-    ax.set_ylabel("Seconds")
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    ax.bar(["With Tools", "Without Tools"],
+           [with_tools["avg_latency_s"], without_tools["avg_latency_s"]],
+           color=["#3498db", "#95a5a6"], edgecolor="white")
+    ax.set_title("Avg Inference Latency (s)")
+
+    # 8) Tool call rate vs efficiency
+    ax = axes[1, 3]
+    ax.bar(["Tool Call Rate", "Tool Efficiency"],
+           [with_tools["tool_call_rate"], with_tools.get("tool_efficiency", 0.0)],
+           color=["#e67e22", "#2ecc71"], edgecolor="white")
+    ax.set_title("Tool Dependency vs Efficiency")
+    ax.set_ylim(0, 1.1)
+    for i, val in enumerate([with_tools["tool_call_rate"], with_tools.get("tool_efficiency", 0)]):
+        ax.text(i, val + 0.02, f"{val:.3f}", ha="center", fontsize=10)
 
     plt.tight_layout()
     path = str(Path(output_dir) / "dashboard.png")
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    
-    # Also generate the standalone Radar Chart figure
-    plot_metric_radar(with_tools, without_tools, consistency_rate, output_dir)
-    
-    logger.info(f"Dashboard and Radar charts saved → {output_dir}")
+    logger.info(f"Dashboard saved → {path}")
     return path
-
-
-# ---------------------------------------------------------------------------
-# Table helpers
-# ---------------------------------------------------------------------------
-_HEADER_BG = "#2C3E50"
-_HEADER_FG = "white"
-_ROW_A     = "#F2F3F4"
-_ROW_B     = "white"
-
-
-@_require_mpl
-def _make_table_fig(title: str, col_labels: list, rows: list, figsize=None) -> "plt.Figure":
-    """Render a styled matplotlib table and return the figure."""
-    n_rows = len(rows)
-    n_cols = len(col_labels)
-    figsize = figsize or (max(8, n_cols * 2.4), 1.0 + n_rows * 0.48)
-    fig, ax = plt.subplots(figsize=figsize)
-    ax.axis("off")
-    tbl = ax.table(cellText=rows, colLabels=col_labels, loc="center", cellLoc="center")
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(10)
-    for c in range(n_cols):
-        cell = tbl[0, c]
-        cell.set_facecolor(_HEADER_BG)
-        cell.set_text_props(color=_HEADER_FG, fontweight="bold")
-        cell.set_height(0.13)
-    for r in range(1, n_rows + 1):
-        bg = _ROW_A if r % 2 == 0 else _ROW_B
-        for c in range(n_cols):
-            cell = tbl[r, c]
-            cell.set_facecolor(bg)
-            cell.set_height(0.10)
-            if c == 0:
-                cell.set_text_props(fontweight="bold")
-    fig.patch.set_facecolor("white")
-    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.02, color=_HEADER_BG)
-    return fig
-
-
-@_require_mpl
-def generate_all_tables(
-    with_tools: dict,
-    without_tools: dict,
-    internalization_results: dict,
-    stage_metrics: list,
-    ablations: dict,
-    output_dir: str,
-) -> list:
-    """
-    Generate all 5 thesis tables as professional PNG images + LaTeX files.
-    """
-    saved = []
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    wt = with_tools
-    nt = without_tools
-    intern = internalization_results
-    eff = ablations.get("efficiency", {})
-    domain = ablations.get("domain", {})
-    faith = ablations.get("faithfulness", {})
-    tool_rel = ablations.get("tool_reliance", {})
-
-    # ── Table 1 — Main Results ───────────────────────────────────────────
-    col1 = ["Metric", "With Tools", "Without Tools", "Delta (W - WO)"]
-    rows1 = [
-        ["Overall Accuracy",
-            f"{wt.get('overall_accuracy', 0):.4f}",
-            f"{nt.get('overall_accuracy', 0):.4f}",
-            f"{wt.get('overall_accuracy', 0) - nt.get('overall_accuracy', 0):+.4f}"],
-        ["Avg Faithfulness",
-            f"{wt.get('avg_faithfulness', 0):.4f}",
-            f"{nt.get('avg_faithfulness', 0):.4f}",
-            f"{wt.get('avg_faithfulness', 0) - nt.get('avg_faithfulness', 0):+.4f}"],
-        ["Avg Format Score",
-            f"{wt.get('avg_format_score', 0):.4f}",
-            f"{nt.get('avg_format_score', 0):.4f}",
-            f"{wt.get('avg_format_score', 0) - nt.get('avg_format_score', 0):+.4f}"],
-        ["Avg Latency (s)",
-            f"{wt.get('avg_latency_s', 0):.4f}",
-            f"{nt.get('avg_latency_s', 0):.4f}",
-            f"{wt.get('avg_latency_s', 0) - nt.get('avg_latency_s', 0):+.4f}"],
-        ["Tool Call Rate",
-            f"{wt.get('tool_call_rate', 0):.4f}",
-            f"{nt.get('tool_call_rate', 0):.4f}",
-            "---"],
-        ["N Examples",
-            str(wt.get('n_examples', 0)),
-            str(nt.get('n_examples', 0)),
-            "---"],
-    ]
-    fig = _make_table_fig("Table 1 - Main Results (CurricSym-SLM-Lite)", col1, rows1)
-    p = str(out / "table1_main_results.png")
-    fig.savefig(p, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    saved.append(p)
-    _write_latex_table("Table 1: Main Results (CurricSym-SLM-Lite)", col1, rows1, p)
-
-    # ── Table 2 — Domain Breakdown ───────────────────────────────────────
-    col2 = ["Domain", "With Tools (Acc)", "Without Tools (Acc)", "Delta"]
-    rows2 = [
-        ["Math (GSM-Symbolic)",
-            f"{wt.get('math_accuracy', 0):.4f}",
-            f"{nt.get('math_accuracy', 0):.4f}",
-            f"{wt.get('math_accuracy', 0) - nt.get('math_accuracy', 0):+.4f}"],
-        ["FOL (ProofWriter)",
-            f"{wt.get('fol_accuracy', 0):.4f}",
-            f"{nt.get('fol_accuracy', 0):.4f}",
-            f"{wt.get('fol_accuracy', 0) - nt.get('fol_accuracy', 0):+.4f}"],
-        ["Overall",
-            f"{wt.get('overall_accuracy', 0):.4f}",
-            f"{nt.get('overall_accuracy', 0):.4f}",
-            f"{wt.get('overall_accuracy', 0) - nt.get('overall_accuracy', 0):+.4f}"],
-    ]
-    fig = _make_table_fig("Table 2 - Domain-Specific Accuracy Breakdown", col2, rows2)
-    p = str(out / "table2_domain_breakdown.png")
-    fig.savefig(p, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    saved.append(p)
-    _write_latex_table("Table 2: Domain-Specific Accuracy Breakdown", col2, rows2, p)
-
-    # ── Table 3 — Curriculum Stage Progression ───────────────────────────
-    stage_labels = ["Early (Full Supervision)", "Mid (Half Supervision)", "Late (No Tools)"]
-    col3 = ["Stage", "Phase", "Tool Ratio", "Training Loss", "Steps"]
-    rows3 = [
-        [str(m["stage"]),
-         stage_labels[i] if i < len(stage_labels) else f"Stage {m['stage']}",
-         f"{m['tool_ratio']:.1f}",
-         f"{m['loss']:.6f}",
-         str(m["steps"])]
-        for i, m in enumerate(stage_metrics)
-    ]
-    fig = _make_table_fig("Table 3 - Curriculum Stage Progression (AdaRFT)",
-                           col3, rows3, figsize=(12, 2.5))
-    p = str(out / "table3_curriculum_stages.png")
-    fig.savefig(p, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    saved.append(p)
-    _write_latex_table("Table 3: Curriculum Stage Progression (AdaRFT)", col3, rows3, p)
-
-    # ── Table 4 — Internalization Analysis ───────────────────────────────
-    delta = intern.get("internalization_delta", 0)
-    interp = ("Moderate - re-run Stage 2 may improve" if delta < 0.15
-              else "Weak - needs more tool-fading stages")
-    col4 = ["Metric", "Value", "Interpretation"]
-    rows4 = [
-        ["Accuracy WITH Tools (paired)",
-            f"{intern.get('accuracy_with_tools', 0):.4f}",
-            "Baseline capability"],
-        ["Accuracy WITHOUT Tools (paired)",
-            f"{intern.get('accuracy_without_tools', 0):.4f}",
-            "Internalized capability"],
-        ["Internalization Delta",
-            f"{delta:.4f}",
-            interp],
-        ["Consistency Rate",
-            f"{intern.get('consistency_rate', 0):.4f}",
-            "Fraction same answer both ways"],
-        ["N Paired Examples",
-            str(intern.get('n_examples', 0)),
-            "Paired ablation dataset"],
-    ]
-    fig = _make_table_fig("Table 4 - Internalization Analysis",
-                          col4, rows4, figsize=(13, 3.2))
-    p = str(out / "table4_internalization.png")
-    fig.savefig(p, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    saved.append(p)
-    _write_latex_table("Table 4: Internalization Analysis", col4, rows4, p)
-
-    # ── Table 5 — Ablation Summary ───────────────────────────────────────
-    col5 = ["Ablation", "Key Metric", "Value", "Finding"]
-    stage_losses = " -> ".join(f"{m['loss']:.5f}" for m in stage_metrics)
-    vs = eff.get("verifier_stats", {})
-    rows5 = [
-        ["Curriculum Stages", "Stage Losses", stage_losses,
-            "Loss rises as tool ratio decreases (harder task)"],
-        ["Tool Reliance", "Tool Call Rate",
-            f"{tool_rel.get('tool_call_rate', 0):.2f}",
-            "Model relies on tools 90% of the time"],
-        ["Domain: Math", "Acc w/t vs w/o",
-            f"{domain.get('math', {}).get('with_tools', 0):.3f} vs "
-            f"{domain.get('math', {}).get('without_tools', 0):.3f}",
-            "Math struggles most without verifier access"],
-        ["Domain: FOL", "Acc w/t vs w/o",
-            f"{domain.get('fol', {}).get('with_tools', 0):.3f} vs "
-            f"{domain.get('fol', {}).get('without_tools', 0):.3f}",
-            "FOL generalizes better without tools"],
-        ["Faithfulness", "Heuristic PRM",
-            f"{faith.get('with_tools', 0):.3f} (w/t)",
-            "Low - neural PRM distillation is future work"],
-        ["Efficiency", "Latency (s)",
-            f"{eff.get('latency_with_tools', 0):.3f} vs "
-            f"{eff.get('latency_without_tools', 0):.3f}",
-            "Tool-free is marginally slower (longer traces)"],
-        ["Verifier", "Z3 Calls / Cache",
-            f"{vs.get('z3_calls', 0)} / {vs.get('cache_size', 0)}",
-            "Efficient caching reduces redundant Z3 calls"],
-    ]
-    fig = _make_table_fig("Table 5 - Ablation Study Summary",
-                          col5, rows5, figsize=(16, 4.2))
-    p = str(out / "table5_ablations.png")
-    fig.savefig(p, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    saved.append(p)
-    _write_latex_table("Table 5: Ablation Study Summary", col5, rows5, p)
-
-    logger.info(f"All {len(saved)} tables and LaTeX source files saved to {output_dir}")
-    return saved

@@ -1,18 +1,4 @@
-"""
-training/reward_functions.py — GRPO Reward Functions
-=====================================================
-Four reward signals used during GRPO training.
-
-TRL's GRPOTrainer passes dataset columns as keyword arguments using their
-*exact column names*.  All signatures use keyword-only parameters to match
-the column names in grpo_train:  answer, domain, tool_ratio.
-
-Reward weights (from thesis):
-  outcome      1.0  (primary signal — correctness)
-  format       0.3  (structural compliance)
-  process      0.3  (heuristic PRM — step-by-step quality)
-  internalize  0.2  (tool-fading signal — penalise tool use in late stages)
-"""
+"""training/reward_functions.py — 4 GRPO reward signals."""
 from __future__ import annotations
 
 import re
@@ -20,13 +6,9 @@ from typing import List
 
 from ..models.verifier import SymbolicVerifier
 
-# Module-level verifier — shared across all reward functions in a process
 _verifier = SymbolicVerifier()
 
 
-# ---------------------------------------------------------------------------
-# Answer / thinking extraction helpers
-# ---------------------------------------------------------------------------
 def extract_answer(completion: str) -> str:
     m = re.search(r"<answer>(.*?)</answer>", completion, re.DOTALL)
     if m:
@@ -43,21 +25,12 @@ def extract_thinking(completion: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-# ---------------------------------------------------------------------------
-# Reward functions
-# ---------------------------------------------------------------------------
 def grpo_outcome_reward(
-    prompts: List[str],
-    completions: List[str],
-    *,
-    answer: List[str] | None = None,
-    domain: List[str] | None = None,
-    **kwargs,
+    prompts: List[str], completions: List[str],
+    *, answer: List[str] | None = None,
+    domain: List[str] | None = None, **kwargs,
 ) -> List[float]:
-    """
-    Outcome reward: Z3 / string correctness.
-    Returns +1.0 if correct, -1.0 if wrong, -0.5 if no answer found.
-    """
+    """Z3 / string correctness: +1.0 correct, -1.0 wrong, -0.5 no answer."""
     if answer is None:
         answer = [""] * len(prompts)
     if domain is None:
@@ -74,14 +47,9 @@ def grpo_outcome_reward(
 
 
 def grpo_format_reward(
-    prompts: List[str],
-    completions: List[str],
-    **kwargs,
+    prompts: List[str], completions: List[str], **kwargs,
 ) -> List[float]:
-    """
-    Format reward: <thinking>...</thinking><answer>...</answer> structure.
-    Max score = 1.0.
-    """
+    """<thinking>/<answer> structural compliance. Max = 1.0."""
     rewards = []
     for c in completions:
         s = 0.0
@@ -89,8 +57,7 @@ def grpo_format_reward(
             s += 0.3
         if "<answer>" in c and "</answer>" in c:
             s += 0.3
-        tp = c.find("<thinking>")
-        ap = c.find("<answer>")
+        tp, ap = c.find("<thinking>"), c.find("<answer>")
         if tp >= 0 and ap > tp:
             s += 0.2
         if len(extract_thinking(c)) > 20:
@@ -100,19 +67,15 @@ def grpo_format_reward(
 
 
 def grpo_process_reward(
-    prompts: List[str],
-    completions: List[str],
-    *,
-    domain: List[str] | None = None,
-    **kwargs,
+    prompts: List[str], completions: List[str],
+    *, domain: List[str] | None = None, **kwargs,
 ) -> List[float]:
     """
-    Heuristic Process Reward Model (PRM): step-by-step quality signal.
-    Credits thinking length in sweet-spot range, step markers, and
-    explicit verify tokens when tools are enabled.
+    Heuristic PRM: step-by-step quality signal.
+    Credits thinking in sweet-spot length, step markers, verify token.
 
-    Thesis note: this is a *heuristic* PRM baseline.  Full neural PRM
-    distillation (from verifier-certified traces) is left as future work.
+    Thesis note: This is a heuristic baseline PRM.
+    Full neural PRM distillation from verifier traces is future work.
     """
     if domain is None:
         domain = ["math"] * len(prompts)
@@ -121,33 +84,28 @@ def grpo_process_reward(
         thinking = extract_thinking(c)
         s = 0.0
         tl = len(thinking)
-        if 50 < tl < 800:
+        if 50 < tl < 600:
             s += 0.3
-        step_markers = ["step", "first", "then", "next", "therefore"]
-        if any(m in thinking.lower() for m in step_markers):
+        if any(m in thinking.lower() for m in ["step", "first", "then", "next", "therefore"]):
             s += 0.1
         if d == "math" and "<verify>" in c:
-            s += 0.2  # credit for using tool when allowed
+            s += 0.2
         rewards.append(min(s, 1.0))
     return rewards
 
 
 def grpo_internalization_reward(
-    prompts: List[str],
-    completions: List[str],
-    *,
-    tool_ratio: List[float] | None = None,
-    **kwargs,
+    prompts: List[str], completions: List[str],
+    *, tool_ratio: List[float] | None = None, **kwargs,
 ) -> List[float]:
     """
-    Internalization reward: penalise tool use in faded (low tool_ratio) stages.
-    Encourages the model to internalise symbolic reasoning rather than
-    relying on external verifier calls.
+    Internalization signal: penalise tool use when tool_ratio < 0.3.
+    Encourages model to internalise symbolic reasoning in late stages.
 
     Returns:
-       -0.3 if model used <verify> when tool_ratio < 0.3  (penalise)
-       +0.1 if model did NOT use <verify> when tool_ratio < 0.3  (reward)
-        0.0 otherwise (tool still enabled, no signal)
+      -0.3  if used <verify> when tool_ratio < 0.3  (penalise dependency)
+      +0.1  if NOT used <verify> when tool_ratio < 0.3  (reward independence)
+       0.0  otherwise (tool enabled, no signal)
     """
     if tool_ratio is None:
         tool_ratio = [0.5] * len(prompts)
@@ -161,9 +119,6 @@ def grpo_internalization_reward(
     return rewards
 
 
-# ---------------------------------------------------------------------------
-# Composite reward list for each GRPO stage
-# ---------------------------------------------------------------------------
 def get_reward_functions(include_internalization: bool = False) -> list:
     fns = [grpo_outcome_reward, grpo_format_reward, grpo_process_reward]
     if include_internalization:
@@ -172,5 +127,4 @@ def get_reward_functions(include_internalization: bool = False) -> list:
 
 
 def get_verifier() -> SymbolicVerifier:
-    """Return the module-level verifier (shared singleton)."""
     return _verifier

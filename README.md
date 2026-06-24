@@ -121,7 +121,7 @@ Training phases and approximate times on a single RTX 4090:
 ## CLI Reference
 
 ```bash
-python curricsym/train.py [OPTIONS]
+python train.py [OPTIONS]
 
 Model:
   --model_name            unsloth/Qwen2.5-3B-Instruct  (default)
@@ -171,12 +171,12 @@ For multi-session training (e.g. 2 × 4-hour RunPod sessions):
 
 **Session 1** — SFT + GRPO Stage 0
 ```bash
-python curricsym/train.py --grpo_max_steps 100   # only runs stage 0
+python train.py --grpo_max_steps 100   # only runs stage 0
 ```
 
 **Session 2** — GRPO Stages 1 & 2 + Evaluation
 ```bash
-python curricsym/train.py \
+python train.py \
   --resume_from_sft   /workspace/curricsym_checkpoints/sft_adapter \
   --resume_grpo_stage 1
 ```
@@ -284,7 +284,7 @@ All randomness is seeded via `--seed 42` (default). The config snapshot `config.
 
 To reproduce a run:
 ```bash
-python curricsym/train.py $(python -c "
+python train.py $(python -c "
 import json
 c = json.load(open('curricsym_output/config.json'))
 flags = ' '.join(f'--{k} {v}' for k,v in c.items()
@@ -309,9 +309,18 @@ print(flags)
 
 ---
 
-## Known Issues / Limitations
+## Limitations & Future Work
 
-- **Heuristic PRM**: The process reward is based on structural features (step markers, trace length), not a distilled neural PRM. This is documented in the thesis as a limitation and future work direction.
-- **Z3 math oracle**: Implemented as numeric equality via UNSAT — equivalent to float comparison but wrapped in a symbolic interface. Not a full arithmetic constraint solver.
-- **FOL "Unknown"**: Z3 has no native 3-valued logic; "Unknown" answers fall back to string matching.
-- **Single GPU**: The RTX 4090 path uses single-GPU training only. DDP is not implemented (and not needed for 3B models on 24 GB).
+To properly contextualise the contribution of CurricSym-SLM-Lite, we highlight the following constraints, which represent direct avenues for future research:
+
+1. **Verifier Limitations (Oracle vs. Native SMT):**
+   The current system relies on Z3 primarily as a fast evaluation oracle. For math, we frame exact-match float equivalence as an UNSAT constraint, and for FOL we check propositional consistency. While computationally efficient, this falls short of a true full-SMT reasoning engine where the SLM generates complex SMT-LIB constraints that the solver fully resolves. **Future work** will focus on expanding the symbolic tool interface to generate and solve multi-step SMT constraints natively.
+   
+2. **Heuristic Process Reward Model (PRM):**
+   Our current process reward (`grpo_process_reward`) uses structural heuristics (e.g., measuring trace length, identifying step-markers, and crediting the `<verify>` tag). While adequate for this "Lite" framework, it weakens the claim of "process-level faithfulness" relative to modern neural PRMs (like Math-Shepherd). **Future work** involves distilling a true Neural PRM by generating multiple reasoning paths and explicitly supervising the PRM via verified intermediate steps.
+
+3. **Three-Valued Logic in FOL:**
+   Z3 lacks native three-valued logic. Consequently, our implementation falls back on string matching when addressing `Unknown` outcomes in First-Order Logic reasoning tasks.
+
+4. **Single-GPU Limitation:**
+   The training loops and checkpoint strategies are tailored for a single RTX 4090 / 24GB instance. DDP (Distributed Data Parallel) has been intentionally removed to avoid complex edge cases with HuggingFace `accelerate`, making the framework simpler to run on consumer hardware but limiting multi-GPU scaling.

@@ -11,19 +11,14 @@ from .visualisation import (
     plot_accuracy_comparison,
     plot_process_quality,
     plot_internalization_delta,
-    generate_all_tables,
+    plot_reward_curve,
+    plot_ood_robustness,
 )
 
 __all__ = [
-    "EvaluationFramework",
-    "InternalizationEvaluator",
-    "run_ablation_studies",
-    "run_full_evaluation",
-    "generate_full_dashboard",
-    "plot_stage_losses",
-    "plot_tool_fading",
-    "plot_accuracy_comparison",
-    "plot_process_quality",
-    "plot_internalization_delta",
-    "generate_all_tables",
+    "EvaluationFramework", "InternalizationEvaluator",
+    "run_ablation_studies", "run_full_evaluation",
+    "generate_full_dashboard", "plot_stage_losses", "plot_tool_fading",
+    "plot_accuracy_comparison", "plot_process_quality",
+    "plot_internalization_delta", "plot_reward_curve", "plot_ood_robustness",
 ]

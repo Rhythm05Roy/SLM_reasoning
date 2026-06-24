@@ -40,15 +40,11 @@ import argparse
 import json
 import logging
 import os
-os.environ['ACCELERATE_MIXED_PRECISION'] = 'bf16'
 import sys
 from pathlib import Path
 
 # ── Make sure the package is importable when running as a script ──────────
-# Insert the directory that *contains* the curricsym/ package.
-_PROJECT_ROOT = Path(__file__).resolve().parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from curricsym.configs import TrainingConfig
 from curricsym.utils import (
@@ -78,7 +74,8 @@ from curricsym.evaluation import (
     plot_accuracy_comparison,
     plot_process_quality,
     plot_internalization_delta,
-    generate_all_tables,
+    plot_reward_curve,
+    plot_ood_robustness,
 )
 from curricsym.reporting import build_experiment_report
 
@@ -94,29 +91,29 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Model
-    p.add_argument("--model_name", default="unsloth/Qwen2.5-3B-Instruct")
-    p.add_argument("--max_seq_length", type=int, default=4096)
+    p.add_argument("--model_name", default="unsloth/Qwen2.5-1.5B-Instruct")
+    p.add_argument("--max_seq_length", type=int, default=2048)
     p.add_argument("--load_in_4bit", action="store_true", default=False,
                    help="Use QLoRA 4-bit (for 7B+ models or <24 GB GPU)")
 
     # LoRA
-    p.add_argument("--lora_r", type=int, default=32)
-    p.add_argument("--lora_alpha", type=int, default=64)
+    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=32)
 
     # SFT
     p.add_argument("--sft_lr", type=float, default=2e-4)
     p.add_argument("--sft_batch_size", type=int, default=4)
-    p.add_argument("--sft_max_steps", type=int, default=500)
+    p.add_argument("--sft_max_steps", type=int, default=300)
 
     # GRPO
     p.add_argument("--grpo_lr", type=float, default=5e-6)
-    p.add_argument("--grpo_batch_size", type=int, default=8)
-    p.add_argument("--grpo_num_generations", type=int, default=8)
-    p.add_argument("--grpo_max_steps", type=int, default=300)
+    p.add_argument("--grpo_batch_size", type=int, default=4)
+    p.add_argument("--grpo_num_generations", type=int, default=4)
+    p.add_argument("--grpo_max_steps", type=int, default=200)
 
     # Data
-    p.add_argument("--gsm_symbolic_size", type=int, default=3000)
-    p.add_argument("--proofwriter_size", type=int, default=2000)
+    p.add_argument("--gsm_symbolic_size", type=int, default=2000)
+    p.add_argument("--proofwriter_size", type=int, default=1500)
 
     # Paths
     p.add_argument("--output_dir", default="")
@@ -135,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb_project", default="curricsym-slm-lite")
 
     # Eval
-    p.add_argument("--max_eval_examples", type=int, default=300)
+    p.add_argument("--max_eval_examples", type=int, default=150)
     p.add_argument("--skip_eval", action="store_true",
                    help="Skip evaluation phases (useful for quick smoke tests)")
 
@@ -226,15 +223,20 @@ def _generate_plots(
     without_tools,
     internalization_results,
     consistency_rate,
-    ablations: dict | None = None,
+    ood_results=None,
+    reward_history=None,
+    tool_ratio_history=None,
 ) -> None:
-    """Generate all thesis figures and publication tables."""
     logger.info("Generating result figures...")
     plot_stage_losses(stage_metrics, config.output_dir)
     plot_tool_fading(stage_metrics, config.output_dir)
     plot_accuracy_comparison(with_tools, without_tools, config.output_dir)
     plot_process_quality(with_tools, consistency_rate, config.output_dir)
     plot_internalization_delta(internalization_results, config.output_dir)
+    if ood_results:
+        plot_ood_robustness(with_tools, ood_results, config.output_dir)
+    if reward_history:
+        plot_reward_curve(reward_history, tool_ratio_history, config.output_dir)
     generate_full_dashboard(
         stage_metrics=stage_metrics,
         with_tools=with_tools,
@@ -242,16 +244,9 @@ def _generate_plots(
         internalization_results=internalization_results,
         consistency_rate=consistency_rate,
         output_dir=config.output_dir,
+        ood_results=ood_results,
     )
-    generate_all_tables(
-        with_tools=with_tools,
-        without_tools=without_tools,
-        internalization_results=internalization_results,
-        stage_metrics=stage_metrics,
-        ablations=ablations or {},
-        output_dir=config.output_dir,
-    )
-    logger.info(f"Figures and tables saved → {config.output_dir}/")
+    logger.info(f"Figures saved → {config.output_dir}/")
 
 
 def _push_to_hub(model, tokenizer, args: argparse.Namespace) -> None:
@@ -295,6 +290,7 @@ def main() -> None:
     sft_eval = datasets["sft_eval"]
     grpo_train = datasets["grpo_train"]
     paired_ablation = datasets["paired_ablation"]
+    ood_set = datasets.get("ood_set")
 
     # ── Phase 0.2: Model ─────────────────────────────────────────────────
     model, tokenizer = load_model_and_tokenizer(config)
@@ -324,6 +320,7 @@ def main() -> None:
         logger.info("--skip_eval set — skipping evaluation phases")
         results = {}
         internalization_results = {}
+        ood_results = None
     else:
         results = run_full_evaluation(
             config=config,
@@ -334,8 +331,10 @@ def main() -> None:
             paired_ablation=paired_ablation,
             stage_metrics=stage_metrics,
             curriculum=curriculum,
+            ood_set=ood_set,
         )
         internalization_results = results.get("internalization", {})
+        ood_results = results.get("ood")
 
     # ── Phase 4: Reporting & Visualisation ────────────────────────────────
     if not args.skip_eval and results:
@@ -348,6 +347,14 @@ def main() -> None:
             curriculum=curriculum,
             verifier=verifier,
         )
+        
+        # Track reward and tool ratios history from curriculum scheduler
+        reward_history = curriculum.reward_history
+        tool_ratio_history = [
+            config.tool_fade_ratios[min(int(s / (len(reward_history) // config.curriculum_stages + 1)), config.curriculum_stages - 1)]
+            for s in range(len(reward_history))
+        ] if reward_history else None
+
         _generate_plots(
             config=config,
             stage_metrics=stage_metrics,
@@ -355,7 +362,9 @@ def main() -> None:
             without_tools=results.get("without_tools", {}),
             internalization_results=internalization_results,
             consistency_rate=results.get("consistency_rate", 0.0),
-            ablations=results.get("ablations", {}),
+            ood_results=ood_results,
+            reward_history=reward_history,
+            tool_ratio_history=tool_ratio_history,
         )
 
     # ── Phase 5: Optional model merge & Hub push ──────────────────────────

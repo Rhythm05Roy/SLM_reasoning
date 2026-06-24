@@ -103,8 +103,8 @@ def main() -> None:
     def _test_config():
         from curricsym.configs import TrainingConfig
         cfg = TrainingConfig()
-        assert cfg.lora_r == 32
-        assert cfg.grpo_num_generations == 8
+        assert cfg.lora_r == 16
+        assert cfg.grpo_num_generations == 4
         assert "unsloth" in cfg.model_name
 
     results.append(check("SymbolicVerifier (math+FOL)",  _test_verifier))
