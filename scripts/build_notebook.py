@@ -100,86 +100,170 @@ research could not verify from outside.
 
 # ─────────────────────────────────────────────────────────────────────────────
 md(r"""
-## 2. Install
+## 2. Install — read this before running
 
-Kaggle's image ships `transformers` but **no** `trl`, `bitsandbytes`, or `peft`.
+### ⚠️ If you have already pip-installed into this session: Factory Reset now
 
-**No Unsloth** — it is a Triton library (Triton needs sm_80+), it patches
-transformers/TRL aggressively, and it imposes an sm_70 floor for ~no gain on Turing.
+*Run → Factory reset*. A plain **restart is not enough** — it keeps pip changes.
 
-**vLLM is optional and installed separately below.** It is ~2× faster for generation
-but is by far the most fragile dependency here: its PyPI wheels are compiled against
-a specific CUDA major version, and if that does not match Kaggle's runtime you get
+Symptoms that mean the environment is already broken:
 
 ```
+ImportError: cannot import name 'copy_method_params' from 'torch.utils._typing_utils'
 ImportError: libcudart.so.13: cannot open shared object file
 ```
 
-which means the wheel wants CUDA 13 while the image provides CUDA 12.x. The notebook
-detects this and falls back to HuggingFace generation automatically, so **a vLLM
-failure is not a blocker.**
+Both come from pip replacing Kaggle's `torch`. The image ships a **matched**
+torch + transformers pair; the moment pip swaps one, `transformers` breaks against
+the other. The `libcudart.so.13` case is a vLLM wheel built for CUDA 13 landing on a
+CUDA 12.x image.
+
+### Install rule: never let pip touch torch or transformers
+
+We install **only** the missing packages, with `--no-deps`, and treat Kaggle's
+torch/transformers as ground truth. This is the difference between a working session
+and a factory reset.
+
+**No Unsloth** — a Triton library (Triton needs sm_80+), patches transformers/TRL
+aggressively, imposes an sm_70 floor, ~no gain on Turing.
+
+**No vLLM by default.** It is ~2× faster but its wheels are pinned to a CUDA major
+version and it drags in its own torch. The HF fallback is slower and reliable; on a
+metered quota, reliable wins.
 """)
+
+md("### 2a. What is already in the image?\n\nRun this first — it decides what we install.")
 
 code(r"""
-%pip install -q "trl==1.10.0" "peft>=0.20.0" "bitsandbytes>=0.50.1" datasets
-print("core install done")
-""")
+import importlib, importlib.metadata as md_, subprocess, sys
 
-md("""
-### 2a. Diagnostics — run this before trying vLLM
-
-Tells us which CUDA major version the image actually provides.
-""")
-
-code(r"""
-import subprocess, torch, importlib.metadata as md_
-
-print("torch           :", torch.__version__)
-print("torch CUDA build:", torch.version.cuda)          # e.g. '12.6' or '13.0'
-print("cudnn           :", torch.backends.cudnn.version())
-for p in ("transformers", "trl", "peft", "bitsandbytes", "vllm", "datasets"):
+def ver(p):
     try:
-        print(f"{p:15s}:", md_.version(p))
+        return md_.version(p)
     except md_.PackageNotFoundError:
-        print(f"{p:15s}: not installed")
+        return None
 
-print("\n-- driver --")
-print(subprocess.run(["nvidia-smi", "--query-gpu=driver_version,name",
-                      "--format=csv,noheader"], capture_output=True, text=True).stdout)
-print("-- libcudart present on system --")
-print(subprocess.run("find / -name 'libcudart.so*' 2>/dev/null | head -10",
-                     shell=True, capture_output=True, text=True).stdout or "none found")
+PKGS = ["torch", "transformers", "trl", "peft", "bitsandbytes",
+        "accelerate", "datasets", "vllm"]
+have = {p: ver(p) for p in PKGS}
+for p, v in have.items():
+    print(f"  {p:15s} {v or '-- MISSING --'}")
+
+import torch
+print("\ntorch CUDA build:", torch.version.cuda)
+print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")
+print("\nMISSING:", [p for p, v in have.items() if v is None and p != 'vllm'])
 """)
 
 md(r"""
-### 2b. vLLM (optional — skip on failure)
+### 2b. Install missing packages only, with `--no-deps`
 
-If `torch.version.cuda` above starts with `12`, a vLLM wheel built for CUDA 13 will
-not load. This cell tries the pinned version, then reports honestly. **If it fails,
-just continue** — Section 3 sets `BACKEND = "hf"` and everything still runs.
-
-`vllm==0.26.0` is the pin because TRL 1.10 hard-caps `vllm>=0.17.0,<=0.26.0`.
+`--no-deps` is the whole point: it stops pip from pulling a different torch or
+transformers. If a package genuinely needs something absent, the import check in 2c
+will say so and you can add that one package explicitly.
 """)
 
 code(r"""
-TRY_VLLM = True   # set False to skip entirely and go straight to the HF backend
+need = [p for p in ["trl", "peft", "bitsandbytes", "accelerate", "datasets"]
+        if have.get(p) is None]
 
-if TRY_VLLM:
-    import subprocess, sys
-    r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vllm==0.26.0"],
-                       capture_output=True, text=True)
+# Pin only trl (TRL's API churns; 1.10 is what this notebook targets).
+spec = {"trl": "trl==1.10.0"}
+
+if need:
+    args = [sys.executable, "-m", "pip", "install", "-q", "--no-deps"] + \
+           [spec.get(p, p) for p in need]
+    print("installing (no-deps):", need)
+    r = subprocess.run(args, capture_output=True, text=True)
     print("pip exit:", r.returncode)
     if r.returncode != 0:
-        print(r.stderr[-1500:])
+        print(r.stderr[-2000:])
+else:
+    print("nothing to install")
+
+# Confirm torch was NOT replaced
+import importlib
+importlib.reload(md_)
+print("\ntorch still:", md_.version("torch"), "| transformers still:", md_.version("transformers"))
+""")
+
+md("""
+### 2c. Import check — the gate
+
+If this passes, the environment is good and you can ignore vLLM entirely.
+""")
+
+code(r"""
+fail = []
+for mod, label in [("torch", "torch"), ("transformers", "transformers"),
+                   ("datasets", "datasets"), ("peft", "peft"),
+                   ("accelerate", "accelerate"), ("trl", "trl")]:
+    try:
+        m = importlib.import_module(mod)
+        print(f"  OK    {label:15s} {getattr(m, '__version__', '?')}")
+    except Exception as e:
+        fail.append((label, f"{type(e).__name__}: {e}"))
+        print(f"  FAIL  {label:15s} {type(e).__name__}: {str(e)[:90]}")
+
+# the two classes we actually need
+try:
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from trl import GRPOConfig, GRPOTrainer
+    from peft import LoraConfig
+    print("\n  OK    key classes import")
+except Exception as e:
+    fail.append(("classes", str(e)))
+    print(f"\n  FAIL  key classes: {type(e).__name__}: {e}")
+
+if fail:
+    names = {f[0] for f in fail}
+    print("\n" + "="*70)
+    if names & {"torch", "transformers"}:
+        print("torch/transformers are mismatched -> the image was modified by pip.")
+        print("FACTORY RESET (Run -> Factory reset), then re-run 1, 2a, 2b, 2c.")
+        print("Do NOT install more packages to repair it; that deepens the problem.")
+    elif names & {"trl", "classes"}:
+        print("trl failed to import but torch/transformers are fine.")
+        print(f"Kaggle's transformers is {md_.version('transformers')}; the trl==1.10.0")
+        print("pin may predate it. Try the current trl instead, still --no-deps:")
+        print("")
+        print('  !pip install -q --no-deps --upgrade trl')
+        print("")
+        print("then re-run this cell. If GRPOConfig later rejects a kwarg, that is")
+        print("handled — Section 6 filters kwargs against the dataclass fields.")
+    else:
+        print("Missing:", sorted(names), "-> install just those with --no-deps.")
+    print("="*70)
+    raise SystemExit("environment not usable")
+print("\nEnvironment OK.")
+""")
+
+md(r"""
+### 2d. vLLM — optional, and off by default
+
+Leave this alone unless you have results already and want a 2× speedup for a later
+run. `vllm==0.26.0` (TRL 1.10 caps at `<=0.26.0`) pulls **its own torch**, which is
+exactly what corrupts the image. If you do try it and anything breaks afterwards,
+factory reset — do not attempt to repair it with more installs.
+
+The HF backend is the supported path in this notebook.
+""")
+
+code(r"""
+TRY_VLLM = False   # leave False. Only flip this if you accept a factory reset.
+
+if TRY_VLLM:
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vllm==0.26.0"],
+                       capture_output=True, text=True)
+    print("pip exit:", r.returncode, "\n", r.stderr[-1200:] if r.returncode else "")
     try:
         from vllm import LLM, SamplingParams
-        print("\nvLLM imports cleanly — fast backend available.")
+        print("vLLM imports cleanly.")
     except Exception as e:
-        print(f"\nvLLM unusable: {type(e).__name__}: {e}")
-        print("--> Continue anyway. Section 3 will select the HF backend.")
-        print("--> Expect roughly 2x slower generation; still fits a 12h session.")
+        print(f"vLLM unusable: {type(e).__name__}: {e}")
+        print("--> HF backend will be used. If transformers now fails too, FACTORY RESET.")
 else:
-    print("skipping vLLM by request")
+    print("vLLM skipped (recommended). Using the HF generation backend.")
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
