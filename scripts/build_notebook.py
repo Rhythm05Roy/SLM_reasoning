@@ -119,7 +119,7 @@ print("done — if vllm pulled a different torch, restart the kernel before cont
 md("## 3. Config, seeding, verifier, data\n\nAll experiment knobs in one place.")
 
 code(r"""
-import gc, json, math, os, random, re, time
+import gc, hashlib, json, math, os, random, re, time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -264,10 +264,13 @@ def load_gsm_symbolic(variant: str, limit: int):
         gold = extract_gsm_answer(ex["answer"])
         if gold is None:
             continue
-        # template id: prefer an explicit field, else derive from the instance id
+        # template id: prefer an explicit field, else derive from the number-masked
+        # question. Uses blake2b, NOT hash() — Python string hashing is salted per
+        # process, so hash() would give different splits on every session.
         tid = ex.get("template_id", ex.get("id", None))
         if tid is None:
-            tid = hash(re.sub(r"-?\d[\d,]*\.?\d*", "#", ex["question"])) % (10**9)
+            masked = re.sub(r"-?\d[\d,]*\.?\d*", "#", ex["question"])
+            tid = hashlib.blake2b(masked.encode(), digest_size=8).hexdigest()
         rows.append({"question": ex["question"], "gold": gold,
                      "src": f"gsm_symbolic_{variant}", "template": str(tid)})
     # keep at most one instantiation per template -> no near-duplicates in eval
@@ -346,42 +349,62 @@ def pass_at_k(n: int, c: int, k: int) -> float:
         return 1.0
     return 1.0 - math.prod((n - c - i) / (n - i) for i in range(k))
 
-def run_passk(model_path: str, rows, tag: str, lora_path: Optional[str] = None):
-    llm = LLM(model=model_path, dtype="float16", gpu_memory_utilization=cfg.vllm_gpu_util,
-              max_model_len=cfg.max_prompt_tokens + cfg.max_completion_length,
-              enable_lora=lora_path is not None, max_lora_rank=cfg.lora_r, seed=SEED)
-    sp = SamplingParams(n=cfg.passk_n_samples, temperature=cfg.passk_temperature,
-                        top_p=1.0, max_tokens=cfg.max_completion_length, seed=SEED)
+MAX_LEN = cfg.max_prompt_tokens + cfg.max_completion_length + 64   # chat-template margin
+
+def make_llm(model_path, lora_path=None, gpu_util=None):
+    "Only pass LoRA kwargs when LoRA is actually used — vLLM rejects max_lora_rank otherwise."
     kw = {}
-    if lora_path:
-        from vllm.lora.request import LoRARequest
-        kw["lora_request"] = LoRARequest("adapter", 1, lora_path)
+    if lora_path is not None:
+        kw.update(enable_lora=True, max_lora_rank=cfg.lora_r)
+    return LLM(model=model_path, dtype="float16", max_model_len=MAX_LEN,
+               gpu_memory_utilization=gpu_util or cfg.vllm_gpu_util, seed=SEED, **kw)
+
+def lora_kwargs(lora_path):
+    if lora_path is None:
+        return {}
+    from vllm.lora.request import LoRARequest
+    return {"lora_request": LoRARequest("adapter", 1, lora_path)}
+
+def run_passk(model_path: str, rows, tag: str, lora_path: Optional[str] = None):
+    llm = make_llm(model_path, lora_path)
+    # NO seed here. With n>1 a fixed seed can collapse the samples toward each other,
+    # which would silently flatten the pass@k curve — the one number this experiment
+    # exists to measure. Diversity across the n samples is the point.
+    sp = SamplingParams(n=cfg.passk_n_samples, temperature=cfg.passk_temperature,
+                        top_p=1.0, max_tokens=cfg.max_completion_length)
+    kw = lora_kwargs(lora_path)
 
     t0 = time.time()
     outs = llm.generate(render(rows), sp, **kw)
     print(f"  generated in {time.time()-t0:.0f}s")
 
-    correct_counts = []
+    correct_counts, n_eff = [], []
     for row, out in zip(rows, outs):
-        c = sum(is_correct(o.text, row["gold"]) for o in out.outputs)
-        correct_counts.append(c)
+        correct_counts.append(sum(is_correct(o.text, row["gold"]) for o in out.outputs))
+        n_eff.append(len(out.outputs))       # guard: vLLM may return fewer than n
 
-    n = cfg.passk_n_samples
-    curve = {k: float(np.mean([pass_at_k(n, c, k) for c in correct_counts]))
+    n = min(n_eff)
+    if n < cfg.passk_n_samples:
+        print(f"  WARNING: got only {n} samples for some prompts "
+              f"(asked {cfg.passk_n_samples}); capping k at {n}")
+    curve = {k: float(np.mean([pass_at_k(ne, c, k)
+                               for c, ne in zip(correct_counts, n_eff)]))
              for k in cfg.passk_ks if k <= n}
     solved_any = sum(c > 0 for c in correct_counts)
 
     del llm; gc.collect(); torch.cuda.empty_cache()
     return {"tag": tag, "n_samples": n, "n_problems": len(rows),
-            "curve": curve, "solved_at_least_once": solved_any,
-            "correct_counts": correct_counts}
+            "curve": {str(k): v for k, v in curve.items()},
+            "solved_at_least_once": solved_any,
+            "correct_counts": correct_counts,
+            "questions": [r["question"] for r in rows]}
 
 subset = eval_id[:cfg.passk_n_problems]
 base_passk = run_passk(cfg.model_name, subset, "base")
 
 print("\npass@k — base model")
-for k, v in base_passk["curve"].items():
-    print(f"  k={k:>3}: {v:.3f}")
+for k in sorted(int(x) for x in base_passk["curve"]):
+    print(f"  k={k:>3}: {base_passk['curve'][str(k)]:.3f}")
 print(f"solved at least once: {base_passk['solved_at_least_once']}/{len(subset)}")
 
 with open(f"{cfg.out_dir}/passk_base.json", "w") as f:
@@ -394,8 +417,8 @@ import matplotlib.pyplot as plt
 def plot_passk(results, fname="passk.png"):
     fig, ax = plt.subplots(figsize=(6, 4))
     for r in results:
-        ks = sorted(r["curve"]); ax.plot(ks, [r["curve"][k] for k in ks],
-                                         marker="o", label=r["tag"])
+        ks = sorted(int(k) for k in r["curve"])      # int sort, not lexicographic
+        ax.plot(ks, [r["curve"][str(k)] for k in ks], marker="o", label=r["tag"])
     ax.set_xscale("log", base=2); ax.set_xlabel("k (samples)")
     ax.set_ylabel("pass@k"); ax.set_title("Coverage vs. sampling budget")
     ax.grid(alpha=.3); ax.legend(); fig.tight_layout()
@@ -450,8 +473,14 @@ print(reward_outcome([["x"]], ["1"]) if False else "rewards defined")
 md(r"""
 ## 6. Experiment 2 — GRPO
 
-**Restart the kernel before this cell** if Section 4 ran — vLLM does not release all
-device memory, and GRPO starts its own colocated engine.
+### ⚠️ Restart the kernel first
+
+vLLM does not release all device memory when its `LLM` object is deleted, and GRPO
+starts its own colocated engine. If Section 4 ran in this kernel, you will OOM here.
+
+**Do this:** *Run → Restart session*, then re-run **cells 1, 3 (config), 3a, 3b** —
+not Section 4 — and continue from here. Section 4's results are already on disk in
+`results/passk_base.json`, and Section 7 reloads them, so you do not lose them.
 
 Config rationale (each of these is load-bearing on a T4):
 
@@ -591,15 +620,12 @@ def wilson(k, n, z=1.96):
     return (max(0.0, c - h), min(1.0, c + h))
 
 def evaluate(model_path, rows, tag, lora_path=None, temperature=0.0):
-    llm = LLM(model=model_path, dtype="float16", gpu_memory_utilization=cfg.vllm_gpu_util,
-              max_model_len=cfg.max_prompt_tokens + cfg.max_completion_length,
-              enable_lora=lora_path is not None, max_lora_rank=cfg.lora_r, seed=SEED)
+    # temperature=0 (greedy) so accuracy is deterministic. The old pipeline sampled
+    # at 0.7 with n=1 and reported 4/20 vs 2/20 on identical rows.
+    llm = make_llm(model_path, lora_path)
     sp = SamplingParams(n=1, temperature=temperature, top_p=1.0,
-                        max_tokens=cfg.max_completion_length, seed=SEED)
-    kw = {}
-    if lora_path:
-        from vllm.lora.request import LoRARequest
-        kw["lora_request"] = LoRARequest("adapter", 1, lora_path)
+                        max_tokens=cfg.max_completion_length)
+    kw = lora_kwargs(lora_path)
 
     t0 = time.time()
     outs = llm.generate(render(rows), sp, **kw)
@@ -631,7 +657,19 @@ with open(f"{cfg.out_dir}/eval.json", "w") as f:
 """)
 
 code(r"""
-# pass@k on the trained model — the decisive overlay
+# Reload the base run from disk so this cell survives a kernel restart between
+# Section 4 and Section 6 (which the Section 6 header tells you to do).
+with open(f"{cfg.out_dir}/passk_base.json") as f:
+    base_passk = json.load(f)
+
+# Re-derive the SAME problem subset the base run used — comparing pass@k across
+# different problem sets would be meaningless.
+subset = [{"question": q, "gold": g} for q, g in
+          zip(base_passk["questions"],
+              [r["gold"] for r in eval_id[:len(base_passk["questions"])]])]
+assert [s["question"] for s in subset] == base_passk["questions"], \
+    "subset mismatch — re-run Section 3b with the same SEED before comparing"
+
 grpo_passk = run_passk(cfg.model_name, subset, "grpo", lora_path=ADAPTER)
 with open(f"{cfg.out_dir}/passk_grpo.json", "w") as f:
     json.dump(grpo_passk, f, indent=2)
@@ -639,18 +677,22 @@ with open(f"{cfg.out_dir}/passk_grpo.json", "w") as f:
 plot_passk([base_passk, grpo_passk], fname="passk_base_vs_grpo.png")
 
 b, g = base_passk["curve"], grpo_passk["curve"]
+shared = sorted(int(k) for k in set(b) & set(g))
 print(f"\n{'k':>4}  {'base':>7}  {'grpo':>7}  {'delta':>7}")
-for k in sorted(b):
-    print(f"{k:>4}  {b[k]:>7.3f}  {g[k]:>7.3f}  {g[k]-b[k]:>+7.3f}")
+for k in shared:
+    bk, gk = b[str(k)], g[str(k)]
+    print(f"{k:>4}  {bk:>7.3f}  {gk:>7.3f}  {gk-bk:>+7.3f}")
 
-kmax = max(b)
-if g[kmax] <= b[kmax]:
-    print(f"\n>>> At k={kmax} the base model matches or beats GRPO.")
+kmax = max(shared)
+bk, gk = b[str(kmax)], g[str(kmax)]
+if gk <= bk:
+    print(f"\n>>> At k={kmax} the base model matches or beats GRPO ({bk:.3f} vs {gk:.3f}).")
     print(">>> Consistent with Yue et al. (2504.13837): RL sharpened rather than expanded.")
     print(">>> Frame the paper as measurement, not as a performance gain.")
 else:
-    print(f"\n>>> GRPO retains an advantage at k={kmax} (+{g[kmax]-b[kmax]:.3f}).")
+    print(f"\n>>> GRPO retains an advantage at k={kmax} (+{gk-bk:.3f}).")
     print(">>> Coverage expansion is defensible — but confirm with a second seed.")
+print("\nNOTE: one seed. Nothing here is publishable until Section 8 items 1-5 are done.")
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
