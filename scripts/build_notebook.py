@@ -102,17 +102,84 @@ research could not verify from outside.
 md(r"""
 ## 2. Install
 
-Kaggle's image ships `transformers` but **no** `trl`, `vllm`, `bitsandbytes`, or
-`peft`. Versions are pinned deliberately:
+Kaggle's image ships `transformers` but **no** `trl`, `bitsandbytes`, or `peft`.
 
-- `vllm==0.26.0` — TRL 1.10 hard-pins `vllm>=0.17.0,<=0.26.0`; PyPI's latest (0.27.1) is **unsupported**
-- **No Unsloth** — it is a Triton library (Triton needs sm_80+), it patches
-  transformers/TRL aggressively, and it imposes an sm_70 floor for ~no gain on Turing
+**No Unsloth** — it is a Triton library (Triton needs sm_80+), it patches
+transformers/TRL aggressively, and it imposes an sm_70 floor for ~no gain on Turing.
+
+**vLLM is optional and installed separately below.** It is ~2× faster for generation
+but is by far the most fragile dependency here: its PyPI wheels are compiled against
+a specific CUDA major version, and if that does not match Kaggle's runtime you get
+
+```
+ImportError: libcudart.so.13: cannot open shared object file
+```
+
+which means the wheel wants CUDA 13 while the image provides CUDA 12.x. The notebook
+detects this and falls back to HuggingFace generation automatically, so **a vLLM
+failure is not a blocker.**
 """)
 
 code(r"""
-%pip install -q "trl==1.10.0" "vllm==0.26.0" "peft>=0.20.0" "bitsandbytes>=0.50.1" datasets
-print("done — if vllm pulled a different torch, restart the kernel before continuing")
+%pip install -q "trl==1.10.0" "peft>=0.20.0" "bitsandbytes>=0.50.1" datasets
+print("core install done")
+""")
+
+md("""
+### 2a. Diagnostics — run this before trying vLLM
+
+Tells us which CUDA major version the image actually provides.
+""")
+
+code(r"""
+import subprocess, torch, importlib.metadata as md_
+
+print("torch           :", torch.__version__)
+print("torch CUDA build:", torch.version.cuda)          # e.g. '12.6' or '13.0'
+print("cudnn           :", torch.backends.cudnn.version())
+for p in ("transformers", "trl", "peft", "bitsandbytes", "vllm", "datasets"):
+    try:
+        print(f"{p:15s}:", md_.version(p))
+    except md_.PackageNotFoundError:
+        print(f"{p:15s}: not installed")
+
+print("\n-- driver --")
+print(subprocess.run(["nvidia-smi", "--query-gpu=driver_version,name",
+                      "--format=csv,noheader"], capture_output=True, text=True).stdout)
+print("-- libcudart present on system --")
+print(subprocess.run("find / -name 'libcudart.so*' 2>/dev/null | head -10",
+                     shell=True, capture_output=True, text=True).stdout or "none found")
+""")
+
+md(r"""
+### 2b. vLLM (optional — skip on failure)
+
+If `torch.version.cuda` above starts with `12`, a vLLM wheel built for CUDA 13 will
+not load. This cell tries the pinned version, then reports honestly. **If it fails,
+just continue** — Section 3 sets `BACKEND = "hf"` and everything still runs.
+
+`vllm==0.26.0` is the pin because TRL 1.10 hard-caps `vllm>=0.17.0,<=0.26.0`.
+""")
+
+code(r"""
+TRY_VLLM = True   # set False to skip entirely and go straight to the HF backend
+
+if TRY_VLLM:
+    import subprocess, sys
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vllm==0.26.0"],
+                       capture_output=True, text=True)
+    print("pip exit:", r.returncode)
+    if r.returncode != 0:
+        print(r.stderr[-1500:])
+    try:
+        from vllm import LLM, SamplingParams
+        print("\nvLLM imports cleanly — fast backend available.")
+    except Exception as e:
+        print(f"\nvLLM unusable: {type(e).__name__}: {e}")
+        print("--> Continue anyway. Section 3 will select the HF backend.")
+        print("--> Expect roughly 2x slower generation; still fits a 12h session.")
+else:
+    print("skipping vLLM by request")
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -332,11 +399,34 @@ claim of Yue et al. That is a publishable finding, but it forces a measurement
 framing rather than a performance claim.
 """)
 
+md(r"""
+### Backend selection
+
+`BACKEND` is chosen by whether vLLM actually imports. Both paths produce the same
+data structures, so every downstream cell is backend-agnostic.
+
+| | vLLM | HF fallback |
+|---|---|---|
+| pass@k (100 problems × 64 samples) | ~10-20 min | ~45-90 min |
+| eval (300 problems, greedy) | ~2-4 min | ~8-15 min |
+| GRPO step | ~21 s | ~42 s |
+""")
+
 code(r"""
-from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+try:
+    from vllm import LLM, SamplingParams
+    BACKEND = "vllm"
+except Exception as e:
+    BACKEND = "hf"
+    print(f"vLLM unavailable ({type(e).__name__}) -> BACKEND='hf'")
+print("BACKEND =", BACKEND)
 
 tok = AutoTokenizer.from_pretrained(cfg.model_name)
+if tok.pad_token is None:
+    tok.pad_token = tok.eos_token
+tok.padding_side = "left"          # required for batched decoder-only generation
 
 def render(rows):
     return [tok.apply_chat_template(build_prompt(r["question"]),
@@ -348,54 +438,131 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     if n - c < k:
         return 1.0
     return 1.0 - math.prod((n - c - i) / (n - i) for i in range(k))
+""")
+
+md("""
+#### HF generation backend
+
+Used when vLLM is unavailable. Two things matter for correctness: **left padding**
+(set above — right padding silently corrupts decoder-only generation) and chunking
+`n` samples so concurrent sequence count stays bounded on a 16 GB card.
+""")
+
+code(r"""
+HF_MAX_CONCURRENT = 32      # sequences in flight; lower this if you OOM
+
+class HFGen:
+    "Minimal batched-generation shim with the same call shape as the vLLM path."
+
+    def __init__(self, model_path, lora_path=None):
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_path, dtype=torch.float16, device_map="cuda:0",
+            attn_implementation="sdpa")
+        if lora_path:
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, lora_path)
+            self.model = self.model.merge_and_unload()   # faster inference
+        self.model.eval()
+
+    @torch.no_grad()
+    def generate(self, prompts, n, temperature, max_new_tokens):
+        "Returns List[List[str]] — n completions per prompt."
+        do_sample = temperature > 0
+        if n > 1 and not do_sample:
+            raise ValueError("n>1 with temperature=0 gives n identical greedy copies")
+
+        # Bound sequences in flight: chunk over BOTH prompts and samples. With n=64
+        # a single prompt would otherwise put 64 sequences on the card at once.
+        n_per_call = min(n, HF_MAX_CONCURRENT)
+        per_batch = max(1, HF_MAX_CONCURRENT // n_per_call)
+
+        out = [[] for _ in prompts]
+        for start in range(0, len(prompts), per_batch):
+            chunk = prompts[start:start + per_batch]
+            enc = tok(chunk, return_tensors="pt", padding=True,
+                      truncation=True, max_length=cfg.max_prompt_tokens).to("cuda:0")
+            plen = enc["input_ids"].shape[1]
+            remaining = n
+            while remaining > 0:
+                take = min(remaining, n_per_call)
+                gen = self.model.generate(
+                    **enc, max_new_tokens=max_new_tokens,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    top_p=1.0 if do_sample else None,
+                    num_return_sequences=take,
+                    pad_token_id=tok.pad_token_id)
+                # HF returns (batch*take, len) grouped by prompt: p0s0,p0s1,...,p1s0,...
+                texts = tok.batch_decode(gen[:, plen:], skip_special_tokens=True)
+                for i in range(len(chunk)):
+                    out[start + i].extend(texts[i * take:(i + 1) * take])
+                remaining -= take
+            done = start + len(chunk)
+            print(f"    {done}/{len(prompts)} prompts "
+                  f"({done * n} completions)", flush=True)
+
+        assert all(len(o) == n for o in out), "sample-count mismatch"
+        return out
+
+    def close(self):
+        del self.model; gc.collect(); torch.cuda.empty_cache()
+
 
 MAX_LEN = cfg.max_prompt_tokens + cfg.max_completion_length + 64   # chat-template margin
 
-def make_llm(model_path, lora_path=None, gpu_util=None):
-    "Only pass LoRA kwargs when LoRA is actually used — vLLM rejects max_lora_rank otherwise."
-    kw = {}
-    if lora_path is not None:
-        kw.update(enable_lora=True, max_lora_rank=cfg.lora_r)
-    return LLM(model=model_path, dtype="float16", max_model_len=MAX_LEN,
-               gpu_memory_utilization=gpu_util or cfg.vllm_gpu_util, seed=SEED, **kw)
+def generate_all(model_path, rows, n, temperature, lora_path=None, gpu_util=None):
+    "Backend-agnostic. Returns List[List[str]] of n completions per row."
+    prompts = render(rows)
+    if BACKEND == "vllm":
+        kw = {}
+        if lora_path is not None:
+            kw.update(enable_lora=True, max_lora_rank=cfg.lora_r)
+        llm = LLM(model=model_path, dtype="float16", max_model_len=MAX_LEN,
+                  gpu_memory_utilization=gpu_util or cfg.vllm_gpu_util, seed=SEED, **kw)
+        # No seed in SamplingParams: with n>1 a fixed seed can collapse samples
+        # toward each other and flatten the pass@k curve we are trying to measure.
+        sp = SamplingParams(n=n, temperature=temperature, top_p=1.0,
+                            max_tokens=cfg.max_completion_length)
+        rkw = {}
+        if lora_path is not None:
+            from vllm.lora.request import LoRARequest
+            rkw["lora_request"] = LoRARequest("adapter", 1, lora_path)
+        outs = llm.generate(prompts, sp, **rkw)
+        texts = [[o.text for o in out.outputs] for out in outs]
+        del llm; gc.collect(); torch.cuda.empty_cache()
+        return texts
+    else:
+        g = HFGen(model_path, lora_path)
+        texts = g.generate(prompts, n, temperature, cfg.max_completion_length)
+        g.close()
+        return texts
+""")
 
-def lora_kwargs(lora_path):
-    if lora_path is None:
-        return {}
-    from vllm.lora.request import LoRARequest
-    return {"lora_request": LoRARequest("adapter", 1, lora_path)}
+md("### Run pass@k on the base model")
 
+code(r"""
 def run_passk(model_path: str, rows, tag: str, lora_path: Optional[str] = None):
-    llm = make_llm(model_path, lora_path)
-    # NO seed here. With n>1 a fixed seed can collapse the samples toward each other,
-    # which would silently flatten the pass@k curve — the one number this experiment
-    # exists to measure. Diversity across the n samples is the point.
-    sp = SamplingParams(n=cfg.passk_n_samples, temperature=cfg.passk_temperature,
-                        top_p=1.0, max_tokens=cfg.max_completion_length)
-    kw = lora_kwargs(lora_path)
-
     t0 = time.time()
-    outs = llm.generate(render(rows), sp, **kw)
-    print(f"  generated in {time.time()-t0:.0f}s")
+    texts = generate_all(model_path, rows, n=cfg.passk_n_samples,
+                         temperature=cfg.passk_temperature, lora_path=lora_path)
+    print(f"  generated in {(time.time()-t0)/60:.1f} min  [backend={BACKEND}]")
 
     correct_counts, n_eff = [], []
-    for row, out in zip(rows, outs):
-        correct_counts.append(sum(is_correct(o.text, row["gold"]) for o in out.outputs))
-        n_eff.append(len(out.outputs))       # guard: vLLM may return fewer than n
+    for row, comps in zip(rows, texts):
+        correct_counts.append(sum(is_correct(t, row["gold"]) for t in comps))
+        n_eff.append(len(comps))            # guard: may return fewer than n
 
     n = min(n_eff)
     if n < cfg.passk_n_samples:
-        print(f"  WARNING: got only {n} samples for some prompts "
+        print(f"  WARNING: only {n} samples for some prompts "
               f"(asked {cfg.passk_n_samples}); capping k at {n}")
     curve = {k: float(np.mean([pass_at_k(ne, c, k)
                                for c, ne in zip(correct_counts, n_eff)]))
              for k in cfg.passk_ks if k <= n}
-    solved_any = sum(c > 0 for c in correct_counts)
 
-    del llm; gc.collect(); torch.cuda.empty_cache()
-    return {"tag": tag, "n_samples": n, "n_problems": len(rows),
+    return {"tag": tag, "backend": BACKEND, "n_samples": n, "n_problems": len(rows),
             "curve": {str(k): v for k, v in curve.items()},
-            "solved_at_least_once": solved_any,
+            "solved_at_least_once": sum(c > 0 for c in correct_counts),
             "correct_counts": correct_counts,
             "questions": [r["question"] for r in rows]}
 
@@ -524,11 +691,15 @@ peft_cfg = LoraConfig(
                     "gate_proj", "up_proj", "down_proj"],
 )
 
-args = GRPOConfig(
+import dataclasses
+
+# Build kwargs, then drop any this TRL version does not accept. TRL's API churns
+# fast (max_prompt_length was removed outright), so filtering by the actual
+# dataclass fields is more durable than guessing the version.
+want = dict(
     output_dir="/kaggle/working/grpo",
     fp16=True, bf16=False,
     # transformers 5.x renamed torch_dtype -> dtype (Kaggle ships 5.15).
-    # If you see an unexpected-kwarg error, swap "dtype" back to "torch_dtype".
     model_init_kwargs={"attn_implementation": "sdpa", "dtype": "float16"},
 
     num_generations=cfg.num_generations,
@@ -538,24 +709,37 @@ args = GRPOConfig(
     per_device_train_batch_size=cfg.per_device_train_batch_size,
     gradient_accumulation_steps=cfg.gradient_accumulation_steps,
 
-    beta=0.0,
-    num_iterations=1,
+    beta=0.0,                      # no ref model: -2.9 GB and no fp16 KL hazard
+    num_iterations=1,              # on-policy; ratio == 1
     loss_type="dr_grpo",
     scale_rewards="none",
     mask_truncated_completions=True,
     max_grad_norm=1.0,
 
-    use_vllm=True, vllm_mode="colocate", vllm_gpu_memory_utilization=0.30,
-
     gradient_checkpointing=True,
-    optim="adamw_bnb_8bit",   # HF's name; "adamw_8bit" is Unsloth-only and will raise
-    use_liger_kernel=False,
+    optim="adamw_bnb_8bit",        # "adamw_8bit" is Unsloth-only and will raise
+    use_liger_kernel=False,        # Triton is sm_80+; FMA fallback on Turing
 
     learning_rate=cfg.learning_rate, lr_scheduler_type="cosine", warmup_ratio=0.1,
     max_steps=cfg.max_steps,
     logging_steps=5, save_steps=25, save_total_limit=2,
     report_to="none", seed=SEED,
 )
+
+if BACKEND == "vllm":
+    want.update(use_vllm=True, vllm_mode="colocate",
+                vllm_gpu_memory_utilization=0.30)
+else:
+    # No vLLM: prefer TRL's continuous batching (needs transformers>=5.8) and
+    # otherwise fall through to plain generate().
+    want.update(use_vllm=False, use_transformers_continuous_batching=True)
+
+valid = {f.name for f in dataclasses.fields(GRPOConfig)}
+dropped = sorted(set(want) - valid)
+if dropped:
+    print("dropped kwargs unsupported by this TRL version:", dropped)
+args = GRPOConfig(**{k: v for k, v in want.items() if k in valid})
+print(f"GRPOConfig built [backend={BACKEND}]")
 
 trainer = GRPOTrainer(
     model=cfg.model_name,
@@ -622,20 +806,16 @@ def wilson(k, n, z=1.96):
 def evaluate(model_path, rows, tag, lora_path=None, temperature=0.0):
     # temperature=0 (greedy) so accuracy is deterministic. The old pipeline sampled
     # at 0.7 with n=1 and reported 4/20 vs 2/20 on identical rows.
-    llm = make_llm(model_path, lora_path)
-    sp = SamplingParams(n=1, temperature=temperature, top_p=1.0,
-                        max_tokens=cfg.max_completion_length)
-    kw = lora_kwargs(lora_path)
-
     t0 = time.time()
-    outs = llm.generate(render(rows), sp, **kw)
+    texts = generate_all(model_path, rows, n=1, temperature=temperature,
+                         lora_path=lora_path)
     secs = time.time() - t0
+    firsts = [c[0] for c in texts]
 
-    hits = sum(is_correct(o.outputs[0].text, r["gold"]) for o, r in zip(outs, rows))
-    fmt  = float(np.mean(reward_format([o.outputs[0].text for o in outs])))
+    hits = sum(is_correct(t, r["gold"]) for t, r in zip(firsts, rows))
+    fmt  = float(np.mean(reward_format(firsts)))
     lo, hi = wilson(hits, len(rows))
 
-    del llm; gc.collect(); torch.cuda.empty_cache()
     res = {"tag": tag, "n": len(rows), "correct": hits,
            "accuracy": hits / len(rows), "ci95": [lo, hi],
            "format_score": fmt, "eval_seconds": round(secs, 1)}
